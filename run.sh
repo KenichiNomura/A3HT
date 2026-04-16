@@ -1,13 +1,4 @@
 #!/bin/bash
-#SBATCH -A m5047
-#SBATCH -C cpu
-#SBATCH -q regular
-#SBATCH -t 8:00:00
-#SBATCH --ntasks-per-node=128
-#SBATCH -N 4
-#SBATCH -n 512
-#SBATCH --qos=preempt
-#SBATCH --requeue
 
 rootdir=${PWD}
 ntasks=${SLURM_NTASKS:-32}
