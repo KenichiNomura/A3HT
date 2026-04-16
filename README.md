@@ -1,6 +1,35 @@
-# Glassy Carbon Thermal Conductivity with LAMMPS and Machine Learning
+# Agentic AI Accelerated High-Throughput (A3HT) Framework for Thermal Conductivity Calculations
 
-This repository builds disordered carbon structures, anneals them with LAMMPS, equilibrates them, computes thermal conductivity with non-equilibrium molecular dynamics (NEMD), and then extracts structural features for machine-learning models.
+![LAMMPS](https://img.shields.io/badge/LAMMPS-MD%20Engine-CB2B1E?style=for-the-badge)
+![OpenKIM](https://img.shields.io/badge/OpenKIM-Interatomic%20Models-00539C?style=for-the-badge)
+![EDIP](https://img.shields.io/badge/EDIP-Marks%202000-6C757D?style=for-the-badge)
+![eHEX](https://img.shields.io/badge/eHEX-NEMD%20Heat%20Exchange-0A7E8C?style=for-the-badge)
+![Python](https://img.shields.io/badge/Python-Analysis%20%26%20ML-3776AB?style=for-the-badge)
+![XGBoost](https://img.shields.io/badge/XGBoost-Thermal%20Conductivity%20Model-EC6B23?style=for-the-badge)
+
+An end-to-end workflow for turning disordered carbon structures into thermal-conductivity data and machine-learning-ready descriptors.
+
+This repository combines atomistic simulation, transport calculations, and data-driven analysis:
+
+- random glassy-carbon structure generation
+- high-temperature annealing with the Marks 2000 EDIP OpenKIM potential
+- 300 K equilibration and NEMD thermal conductivity calculations in LAMMPS
+- structural analysis of annealed and driven configurations
+- feature-table generation for downstream ML models
+
+> In short: generate structure -> anneal -> thermalize -> drive heat flux with `eHEX` -> analyze -> train.
+
+## A3HT At A Glance
+
+| Component | Role |
+| --- | --- |
+| `generate_random_carbon.py` | Builds the initial disordered carbon network |
+| `anneal.in` | Reshapes the network through staged high-temperature annealing |
+| `thermalize.in` | Brings the annealed sample to a stable 300 K state |
+| `nemd.in` | Imposes a heat flux and estimates thermal conductivity |
+| `analyze_glassy_carbon*.py` | Extracts structural metrics, distributions, and trajectory trends |
+| `build_ml_features.py` | Aggregates per-run outputs into one ML dataset |
+| `train_xgboost_thermal_conductivity.py` | Learns structure-property relationships from the generated runs |
 
 The simulation workflow in this repo is:
 
@@ -27,6 +56,12 @@ You will need:
   - `numpy`
   - `xgboost` for model training
 - A Slurm environment if you want to run `run.sh` unchanged, because it uses `srun`
+
+Recommended practical setup:
+
+- a LAMMPS build linked cleanly against OpenKIM
+- the Marks 2000 EDIP/C model installed in your user KIM collection
+- multiple independent seeds in `my_runs/` if you want meaningful ML training data
 
 The default run script expects the LAMMPS executable at:
 
@@ -55,9 +90,10 @@ based on that installation.
 - `analyze_glassy_carbon_trajectory.py`: analyzes an annealing trajectory as a time series
 - `build_ml_features.py`: collects analysis outputs into one ML feature table
 - `train_xgboost_thermal_conductivity.py`: trains an XGBoost regressor on the feature table
-- `generate_analysis_powerpoint.py`: creates a simple `.pptx` summary for one analyzed run
 
 ## Simulation Workflow
+
+The simulation side of A3HT is organized as a compact three-stage pipeline before analysis: build a candidate carbon network, structurally relax it through annealing and equilibration, then measure transport under a controlled non-equilibrium heat flux.
 
 ### 1. Generate the initial structure
 
@@ -92,6 +128,8 @@ The annealing schedule is:
 - 4000 K for 10 ps
 - 4000 K for 50 ps
 
+This stage is where the initially random flake assembly is driven toward a more connected glassy-carbon network.
+
 Outputs include:
 
 - `data/anneal_gc_edip_multistage.restart`
@@ -107,6 +145,8 @@ Outputs include:
 - shifts the periodic cell so wrapped `z` coordinates stay non-negative
 - minimizes the annealed structure
 - equilibrates at 300 K with repeated NVT, NPT, and NVE stages
+
+This separates structural preparation from the transport calculation so the NEMD run starts from an already relaxed state.
 
 Outputs include:
 
@@ -132,6 +172,8 @@ fix coldflux all ehex 1000 -${eflux} region cold
 - computes running hot and cold slab temperatures
 - estimates the thermal conductivity from the imposed heat flux and measured temperature drop
 
+The transport setup uses frozen boundary slabs plus hot/cold exchange regions, so the calculation is a direct non-equilibrium estimate rather than an equilibrium fluctuation method.
+
 Important NEMD settings in the current script:
 
 - `dt = 0.0001 ps`
@@ -155,6 +197,8 @@ Outputs include:
 - `data/gc_edip_nemd.cont.data`
 
 ## Running the Full Workflow
+
+For a standard run, you only need a seed, a valid LAMMPS executable, and the OpenKIM model installed.
 
 The main driver is:
 
@@ -189,6 +233,8 @@ and simulation outputs under:
 `my_runs/<seed>/data/`
 
 ## Post-Processing
+
+Once a run finishes, the analysis scripts turn raw LAMMPS outputs into summaries that are easier to inspect, compare, and use for ML.
 
 ### Analyze a single structure or final trajectory frame
 
@@ -226,6 +272,8 @@ This produces a time-series summary in:
 
 ## Building the ML Dataset
 
+The ML pipeline is designed around many completed runs under `my_runs/`, where each seed acts as one structure-processing-transport sample.
+
 After you have multiple completed runs in `my_runs/`, build the feature table with:
 
 ```bash
@@ -256,6 +304,8 @@ The feature builder uses:
 
 ## Training the XGBoost Model
 
+With `ml_features.csv` in place, the final step is a supervised regression model that maps structural descriptors to the final NEMD conductivity target.
+
 Train the regression model with:
 
 ```bash
@@ -275,7 +325,6 @@ Outputs include:
 ## Notes and Assumptions
 
 - `run.sh` is written for Slurm and uses `srun`; adapt it if you want to run without Slurm.
-- The included helper script `generate_analysis_powerpoint.py` is currently hard-coded to use `my_runs/100/analysis`.
 - The repository contains local LAMMPS build directories, but the documented requirement is a LAMMPS executable that supports OpenKIM and `fix ehex`.
 - The NEMD method implemented here is a direct heat-flux approach using `eHEX`, not Green-Kubo.
 
