@@ -1,0 +1,130 @@
+echo            both
+units           metal
+dimension       3
+boundary        p p p
+atom_style      atomic
+
+variable        procx index *
+variable        procy index *
+variable        procz index *
+
+variable        kim_model string EDIP_LAMMPS_Marks_2000_C__MO_374144505645_000
+
+# Use the Marks 2000 EDIP/C OpenKIM model for carbon.
+kim             init ${kim_model} metal
+
+# Simulation controls
+variable        T0 equal 300.0
+variable        dt equal 0.0001          # ps 
+variable        seed equal 492845
+
+# NEMD controls
+variable        slabw equal 5.0           # hot/cold slab width in Angstrom
+variable        binsize equal 5.0         # temperature profile bin size in Angstrom
+#variable        eflux equal 5.0          # eV/ps injected to hot slab, removed from cold slab  # good for glassycarbon3.xyz
+variable        eflux equal 1.0          # eV/ps injected to hot slab, removed from cold slab
+
+# Run lengths
+variable        nvt_steps equal 250000    # 25 ps
+variable        npt_steps equal 250000    # 25 ps
+variable        nve_steps equal 250000    # 25 ps
+
+# Paths
+variable        outdir string data
+shell           mkdir ${outdir}
+
+processors      ${procx} ${procy} ${procz}
+
+# The XYZ file uses the element symbol "C" for atom labels.
+read_restart    gc_edip.restart
+
+labelmap        atom 1 C
+#read_dump       ${xyzfile} 0 type x y z box no add yes format xyz
+
+mass            1 12.011
+
+neighbor        2.0 bin
+neigh_modify    delay 0 every 1 check yes
+
+kim             interactions C
+
+thermo          1000
+thermo_modify   flush yes
+timestep        ${dt}
+
+compute         zmin all reduce min z
+run             0
+variable        shift equal -c_zmin
+
+# Translate the periodic box together with the atoms so wrapped coordinates
+# remain in a non-negative z interval in all downstream restart/data files.
+variable        zlo_shifted equal zlo+v_shift
+variable        zhi_shifted equal zhi+v_shift
+change_box      all z final ${zlo_shifted} ${zhi_shifted} remap units box
+
+kim             interactions C
+
+# Geometry used for the source/sink and conductivity estimate.
+variable        zhot_lo equal 0.25*lz-0.5*v_slabw
+variable        zhot_hi equal 0.25*lz+0.5*v_slabw
+variable        zcold_lo equal 0.75*lz-0.5*v_slabw
+variable        zcold_hi equal 0.75*lz+0.5*v_slabw
+variable        zhot_ctr equal 0.25*lz
+variable        zcold_ctr equal 0.75*lz
+variable        dz equal v_zcold_ctr-v_zhot_ctr
+variable        area equal lx*ly
+
+region          hot block INF INF INF INF v_zhot_lo v_zhot_hi units box
+region          cold block INF INF INF INF v_zcold_lo v_zcold_hi units box
+group           hot region hot
+group           cold region cold
+
+# Relax the imported structure before dynamics.
+reset_timestep  0
+min_style       cg
+minimize        1.0e-10 1.0e-10 10000 100000
+
+velocity        all create ${T0} ${seed} mom yes rot no dist gaussian
+fix             mom all momentum 100 linear 1 1 1
+
+# Equilibrate at 300 K.
+fix             eq1 all nvt temp ${T0} ${T0} 0.1
+thermo_style    custom step temp pe ke etotal press vol
+run             ${nvt_steps}
+unfix           eq1
+
+# Relax the periodic box at 300 K before switching to microcanonical dynamics.
+fix             eq2 all npt temp ${T0} ${T0} 0.1 iso 0.0 0.0 1.0
+run             ${npt_steps}
+unfix           eq2
+
+# Let the relaxed structure evolve microcanonically before applying the heat flux.
+fix             eq3 all nve
+run             ${nve_steps}
+unfix           eq3
+
+# Equilibrate at 300 K.
+fix             eq4 all nvt temp ${T0} ${T0} 0.1
+thermo_style    custom step temp pe ke etotal press vol
+run             ${nvt_steps}
+unfix           eq4
+
+# Relax the periodic box at 300 K before switching to microcanonical dynamics.
+fix             eq5 all npt temp ${T0} ${T0} 0.1 iso 0.0 0.0 1.0
+run             ${npt_steps}
+unfix           eq5
+
+# Let the relaxed structure evolve microcanonically.
+fix             eq6 all nve
+run             ${nve_steps}
+unfix           eq6
+
+# Equilibrate at 300 K one more time before applying the heat flux.
+fix             eq7 all nvt temp ${T0} ${T0} 0.1
+thermo_style    custom step temp pe ke etotal press vol
+run             ${nvt_steps}
+unfix           eq7
+
+
+write_restart   ${outdir}/gc_edip_thermalize.restart
+write_data      ${outdir}/gc_edip_thermalize.data

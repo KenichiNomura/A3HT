@@ -1,0 +1,101 @@
+echo            both
+units           metal
+dimension       3
+boundary        p p p
+atom_style      atomic
+
+variable        procx index *
+variable        procy index *
+variable        procz index *
+
+# Input structure and potential
+#variable        xyzfile string ../glassycarbon5.xyz # Diffusion carbon
+variable        outdir string data
+shell           mkdir ${outdir}
+variable        kim_model string EDIP_LAMMPS_Marks_2000_C__MO_374144505645_000
+
+# Use the Marks 2000 EDIP/C OpenKIM model for carbon.
+kim             init ${kim_model} metal
+
+# Simulation controls
+variable        Tstart equal 1500.0
+variable        T1 equal 2500.0
+variable        T2 equal 3000.0
+variable        T3 equal 3500.0
+variable        T4 equal 4000.0
+variable        T5 equal 4000.0
+variable        dt equal 0.0002            # ps = 0.2 fs
+variable        Tdamp equal 0.1            # ps = 100 fs
+variable        Pdamp equal 1.0            # ps = 1000 fs
+variable        seed equal 492845
+variable        coord_cutoff equal 1.85    # Angstrom
+
+# Run lengths
+variable        anneal_10ps_steps equal 50000   # 10 ps at 0.2 fs
+variable        anneal_50ps_steps equal 250000  # 50 ps at 0.2 fs
+
+processors      ${procx} ${procy} ${procz}
+
+# The XYZ file uses the element symbol "C" for atom labels.
+read_data        random_carbon.dat 
+
+#mass            1 12.011
+
+neighbor        2.0 bin
+neigh_modify    delay 0 every 1 check yes
+
+kim             interactions C
+
+# Coordination analysis using a tunable C-C first-neighbor cutoff.
+compute         coord all coord/atom cutoff ${coord_cutoff}
+variable        is2 atom (c_coord>=1.5 && c_coord<2.5)
+variable        is3 atom (c_coord>=2.5 && c_coord<3.5)
+variable        is4 atom (c_coord>=3.5 && c_coord<4.5)
+compute         n2 all reduce sum v_is2
+compute         n3 all reduce sum v_is3
+compute         n4 all reduce sum v_is4
+
+thermo          1000
+thermo_modify   flush yes
+timestep        ${dt}
+thermo_style    custom step temp pe ke etotal press vol lx ly lz c_n2 c_n3 c_n4
+
+reset_timestep  0
+min_style       cg
+minimize        1.0e-10 1.0e-10 10000 100000
+
+velocity        all create ${Tstart} ${seed} mom yes rot no dist gaussian
+fix             mom all momentum 100 linear 1 1 1
+
+dump            traj all custom 5000 ${outdir}/anneal_gc_edip_multistage.lammpstrj id type x y z vx vy vz
+fix             coordlog all ave/time 100 10 1000 c_n2 c_n3 c_n4 file ${outdir}/anneal_gc_edip_multistage_coordination.dat mode scalar
+
+# Anneal for 10 ps at 1500 K.
+fix             anneal1 all nvt temp ${T1} ${T1} ${Tdamp}
+run             ${anneal_10ps_steps}
+unfix           anneal1
+
+# Anneal for 10 ps at 2000 K.
+fix             anneal2 all nvt temp ${T2} ${T2} ${Tdamp}
+run             ${anneal_10ps_steps}
+unfix           anneal2
+
+# Anneal for 10 ps at 3000 K.
+fix             anneal3 all nvt temp ${T3} ${T3} ${Tdamp}
+run             ${anneal_10ps_steps}
+unfix           anneal3
+
+# Anneal for 10 ps at 4000 K.
+fix             anneal4 all nvt temp ${T4} ${T4} ${Tdamp}
+run             ${anneal_10ps_steps}
+unfix           anneal4
+
+# Anneal for 50 ps at 4500 K.
+fix             anneal5 all nvt temp ${T5} ${T5} ${Tdamp}
+run             ${anneal_50ps_steps}
+unfix           anneal5
+
+undump          traj
+unfix           coordlog
+write_restart   ${outdir}/anneal_gc_edip_multistage.restart
+write_data      ${outdir}/anneal_gc_edip_multistage.data

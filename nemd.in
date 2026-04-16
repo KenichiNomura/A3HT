@@ -1,0 +1,127 @@
+echo            both
+units           metal
+dimension       3
+boundary        p p p
+atom_style      atomic
+
+variable        procx index *
+variable        procy index *
+variable        procz index *
+
+variable        kim_model string EDIP_LAMMPS_Marks_2000_C__MO_374144505645_000
+
+# Use the Marks 2000 EDIP/C OpenKIM model for carbon.
+kim             init ${kim_model} metal
+
+# Simulation controls
+variable        dt equal 0.0001
+
+# NEMD controls
+variable        slabw equal 5.0           # hot/cold slab width in Angstrom
+variable        freezew equal 5.0         # frozen slab width in Angstrom
+variable        binsize equal 5.0         # temperature profile bin size in Angstrom
+variable        eflux equal 0.2          # eV/ps injected to hot slab, removed from cold slab  # good for glassycarbon3.xyz
+
+# Run lengths
+variable        nemd_steps equal 1000000   # 200 ps
+
+variable        outdir string data
+shell           mkdir ${outdir}
+
+processors      ${procx} ${procy} ${procz}
+
+read_restart    gc_edip.restart
+
+# The XYZ file uses the element symbol "C" for atom labels.
+labelmap        atom 1 C
+mass            1 12.011
+
+kim             interactions C
+
+neighbor        2.0 bin
+neigh_modify    delay 0 every 1 check yes
+
+thermo          1000
+thermo_modify   flush yes
+timestep        ${dt}
+
+compute         zmin all reduce min z
+run             0
+variable        shift equal -c_zmin
+# Translate the periodic box together with the atoms so wrapped coordinates
+# remain in a non-negative z interval throughout the run.
+variable        zlo_shifted equal zlo+v_shift
+variable        zhi_shifted equal zhi+v_shift
+change_box      all z final ${zlo_shifted} ${zhi_shifted} remap units box
+kim             interactions C
+
+# Geometry used for the frozen boundaries, source/sink, and conductivity estimate.
+variable        zfreeze_bot_hi equal zlo+v_freezew
+variable        zfreeze_top_lo equal zhi-v_freezew
+variable        zcold_lo equal v_zfreeze_bot_hi
+variable        zcold_hi equal v_zfreeze_bot_hi+v_slabw
+variable        zhot_lo equal v_zfreeze_top_lo-v_slabw
+variable        zhot_hi equal v_zfreeze_top_lo
+variable        zhot_ctr equal 0.5*(v_zhot_lo+v_zhot_hi)
+variable        zcold_ctr equal 0.5*(v_zcold_lo+v_zcold_hi)
+variable        dz equal abs(v_zhot_ctr-v_zcold_ctr)
+variable        area equal lx*ly
+
+region          freeze_bot block INF INF INF INF INF v_zfreeze_bot_hi units box
+region          freeze_top block INF INF INF INF v_zfreeze_top_lo INF units box
+region          hot block INF INF INF INF v_zhot_lo v_zhot_hi units box
+region          cold block INF INF INF INF v_zcold_lo v_zcold_hi units box
+# Rebuild these groups after read_restart so they match the current NEMD slabs
+# rather than any stale definitions carried in from thermalization.
+group           hot region hot
+group           cold region cold
+group           freeze_bot region freeze_bot
+group           freeze_top region freeze_top
+group           frozen union freeze_bot freeze_top
+group           mobile subtract all frozen
+variable        nhot equal count(hot)
+variable        ncold equal count(cold)
+print           "NEMD slab atom counts: hot=${nhot} cold=${ncold}"
+if              "${nhot} == 0 || ${ncold} == 0" then &
+                "print 'ERROR: Hot/cold NEMD slab is empty after restart remap. Adjust slab/freeze widths or the sample geometry.'" &
+                "quit 1"
+
+# Start a fresh NEMD run from the imported data file.
+reset_timestep  0
+velocity        frozen set 0.0 0.0 0.0
+fix             freeze frozen setforce 0.0 0.0 0.0
+fix             int all nve
+#fix             hotflux hot heat 1000 ${eflux} region hot
+#fix             coldflux cold heat 1000 -${eflux} region cold
+fix             hotflux all ehex 1000 ${eflux} region hot
+fix             coldflux all ehex 1000 -${eflux} region cold
+
+compute         Thot hot temp/region hot
+compute         Tcold cold temp/region cold
+compute         keatom mobile ke/atom
+variable        atemp atom c_keatom/(1.5*8.617333262e-5)
+compute         zchunks all chunk/atom bin/1d z lower ${binsize} units box
+
+fix             prof mobile ave/chunk 100 1000 100000 zchunks v_atemp file ${outdir}/gc_edip_Tprofile.cont.dat
+
+# Aggregate hot/cold temperatures from the start of this run so dT and kappa
+# are cumulative rather than block-averaged over the latest output window.
+fix             hotcold_avg all ave/time 100 10 1000 c_Thot c_Tcold ave running mode scalar
+
+# The plate-to-plate separation is measured between the hot and cold slab centers.
+# With frozen end slabs, the imposed heat current traverses the sample only once.
+variable        dT equal f_hotcold_avg[1]-f_hotcold_avg[2]
+variable        Jz equal abs(${eflux})/v_area
+# Avoid aborting when the running average has not yet developed a temperature
+# difference; report zero conductivity until the gradient is non-zero.
+variable        kappa equal ternary(abs(v_dT) > 1.0e-12, 1602.176634*v_Jz*v_dz/v_dT, 0.0)
+
+fix             stats all ave/time 100000 1 100000 f_hotcold_avg[1] f_hotcold_avg[2] v_dT v_Jz v_kappa file ${outdir}/gc_edip_hotcold.cont.dat mode scalar
+
+thermo_style    custom step temp c_Thot c_Tcold v_dT v_Jz v_kappa pe ke etotal press
+thermo_modify   flush yes
+dump            trj all custom 50000 ${outdir}/gc_edip_nemd.cont.lammpstrj id type x y z vx vy vz
+run             ${nemd_steps}
+
+write_restart   ${outdir}/gc_edip_nemd.cont.restart
+write_data      ${outdir}/gc_edip_nemd.cont.data
