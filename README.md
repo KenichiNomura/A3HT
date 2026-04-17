@@ -302,6 +302,8 @@ The feature builder uses:
 - histogram-derived descriptors
 - final hot/cold slab temperatures and conductivity target
 
+A column-by-column overview of the ML inputs is in [FEATURE_GUIDE.md](FEATURE_GUIDE.md).
+
 ## Training the XGBoost Model
 
 With `ml_features.csv` in place, the final step is a supervised regression model that maps structural descriptors to the final NEMD conductivity target.
