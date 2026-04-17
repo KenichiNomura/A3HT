@@ -1,10 +1,10 @@
 # Agentic AI Accelerated High-Throughput (A3HT) Framework for Thermal Conductivity Calculations
 
-![LAMMPS](https://img.shields.io/badge/LAMMPS-MD%20Engine-CB2B1E?style=for-the-badge)
-![OpenKIM](https://img.shields.io/badge/OpenKIM-Interatomic%20Models-00539C?style=for-the-badge)
-![EDIP](https://img.shields.io/badge/EDIP-Marks%202000-6C757D?style=for-the-badge)
-![eHEX](https://img.shields.io/badge/eHEX-NEMD%20Heat%20Exchange-0A7E8C?style=for-the-badge)
-![Python](https://img.shields.io/badge/Python-Analysis%20%26%20ML-3776AB?style=for-the-badge)
+[![LAMMPS](https://img.shields.io/badge/LAMMPS-MD%20Engine-CB2B1E?style=for-the-badge)](https://www.lammps.org/)
+[![OpenKIM](https://img.shields.io/badge/OpenKIM-Interatomic%20Models-00539C?style=for-the-badge)](https://openkim.org)
+[![EDIP](https://img.shields.io/badge/EDIP-Marks%202000-6C757D?style=for-the-badge)](https://link.aps.org/doi/10.1103/PhysRevB.63.035401)
+[![eHEX](https://img.shields.io/badge/eHEX-NEMD%20Heat%20Exchange-0A7E8C?style=for-the-badge)](https://docs.lammps.org/fix_ehex.html)
+[![Python](https://img.shields.io/badge/Python-Analysis%20%26%20ML-3776AB?style=for-the-badge)](https://www.python.org/)
 ![XGBoost](https://img.shields.io/badge/XGBoost-Thermal%20Conductivity%20Model-EC6B23?style=for-the-badge)
 
 An end-to-end workflow for turning disordered carbon structures into thermal-conductivity data and machine-learning-ready descriptors.
