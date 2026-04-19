@@ -62,10 +62,11 @@ Recommended practical setup:
 - a LAMMPS build linked cleanly against OpenKIM
 - the Marks 2000 EDIP/C model installed in your user KIM collection
 - multiple independent seeds in `my_runs/` if you want meaningful ML training data
+- a PBS environment if you want to use the included queue-filler unchanged
 
 The default run script expects the LAMMPS executable at:
 
-`build-kim-rigid-omp-kimenv/lmp`
+`lammps-30Mar2026/build-cray-shared/lmp`
 
 It also tries to locate the OpenKIM model under:
 
@@ -82,6 +83,8 @@ based on that installation.
 ## Main Files
 
 - `run.sh`: end-to-end driver for structure generation, annealing, thermalization, and NEMD
+- `cron_queue.sh`: keeps the PBS queue filled and now prioritizes retry seeds from `.queue_state/resubmit_seeds.txt`
+- `prepare_resubmits.py`: finds failed/incomplete runs, purges their run directories, and writes the retry queue for cron
 - `generate_random_carbon.py`: creates a random carbon network from rotated graphene-like flakes
 - `anneal.in`: high-temperature annealing schedule using the Marks 2000 EDIP/C OpenKIM model
 - `thermalize.in`: minimization plus NVT/NPT/NVE equilibration before transport calculation
@@ -227,10 +230,71 @@ with logs:
 - `anneal.log`
 - `thermalize.log`
 - `nemd.log`
+- `run_status.txt`
+- `run_failure.txt` when a run exits unsuccessfully
 
 and simulation outputs under:
 
 `my_runs/<seed>/data/`
+
+`run_status.txt` contains one of:
+
+- `SUCCESS`
+- `FAILED`
+- `RUNNING`
+
+If a run fails, `run_failure.txt` records the UTC timestamp, failing stage, and message.
+
+## Queue Management and Resubmission
+
+The repository includes a lightweight PBS queue-filler:
+
+```bash
+bash cron_queue.sh
+```
+
+By default it keeps `A3HT_TARGET_JOBS` jobs in the scheduler and submits `run.sh` with successive seeds from:
+
+`.queue_state/next_seed`
+
+If:
+
+- a run crashes
+- a job times out
+- the environment check fails
+- or you want to purge and resubmit incomplete runs
+
+use:
+
+```bash
+python3 prepare_resubmits.py --purge-run-dirs
+```
+
+This script:
+
+- scans `my_runs/` for non-successful runs
+- queues failed seeds in `.queue_state/resubmit_seeds.txt`
+- writes a manifest to `.queue_state/resubmit_manifest.json`
+- removes the corresponding run directories before retry so stale partial outputs do not survive into the resubmission
+
+`cron_queue.sh` consumes `.queue_state/resubmit_seeds.txt` before it advances `.queue_state/next_seed`, so retries are submitted ahead of brand-new seeds.
+
+The default behavior is conservative: it queues `FAILED` runs and leaves currently `RUNNING` runs untouched. If you intentionally want to include stale `RUNNING` directories after manual inspection, use:
+
+```bash
+python3 prepare_resubmits.py --purge-run-dirs --include-running
+```
+
+## Failure Notes
+
+One common failure mode is a LAMMPS executable that was built without the `KIM` package. In that case `run.sh` will fail during `environment_check` and write a `run_failure.txt` entry like:
+
+```text
+stage=environment_check
+message=... was built without the LAMMPS KIM package enabled
+```
+
+Those runs are safe to purge and requeue after you point `LAMMPS_BIN` or `LAMMPS_DIR` at a KIM-enabled build.
 
 ## Post-Processing
 
@@ -326,7 +390,7 @@ Outputs include:
 
 ## Notes and Assumptions
 
-- `run.sh` is written for Slurm and uses `srun`; adapt it if you want to run without Slurm.
+- `run.sh` is written for PBS and launches LAMMPS through `mpiexec` or `mpirun`.
 - The repository contains local LAMMPS build directories, but the documented requirement is a LAMMPS executable that supports OpenKIM and `fix ehex`.
 - The NEMD method implemented here is a direct heat-flux approach using `eHEX`, not Green-Kubo.
 
