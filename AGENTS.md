@@ -45,7 +45,7 @@ When proposing a plan, provide:
 
 For now, treat these as hard constraints on proposed simulation plans unless the user explicitly overrides them:
 
-- Flake lateral size: 10-30 A
+- Flake area: 10-30 A^2
 - Total simulation box in x: 20-50 A
 - Total simulation box in y: 20-50 A
 - Total simulation box in z: 40-100 A

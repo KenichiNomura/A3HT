@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="/lus/eagle/projects/uMLIP-PET-FT/knomura/a3ht"
 JOB_SCRIPT="${A3HT_JOB_SCRIPT:-${ROOT_DIR}/run.sh}"
 PLANNER_SCRIPT="${A3HT_PLANNER_SCRIPT:-${ROOT_DIR}/plan_simulation.py}"
+LOOP_STATUS_SCRIPT="${A3HT_LOOP_STATUS_SCRIPT:-${ROOT_DIR}/loop_status.py}"
 JOB_NAME="${A3HT_JOB_NAME:-a3ht}"
 TARGET_JOBS="${A3HT_TARGET_JOBS:-10}"
 STATE_DIR="${A3HT_STATE_DIR:-${ROOT_DIR}/.queue_state}"
@@ -141,6 +142,11 @@ if [ ! -f "${PLANNER_SCRIPT}" ]; then
     exit 1
 fi
 
+if [ ! -f "${LOOP_STATUS_SCRIPT}" ]; then
+    printf '%s loop status script not found: %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${LOOP_STATUS_SCRIPT}" >> "${LOG_FILE}"
+    exit 1
+fi
+
 if ! active_jobs="$(count_active_jobs)"; then
     printf '%s failed to query active jobs via scheduler\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> "${LOG_FILE}"
     exit 1
@@ -169,6 +175,16 @@ jobs_to_submit=$((TARGET_JOBS - active_jobs))
 submitted=0
 
 while [ "${submitted}" -lt "${jobs_to_submit}" ]; do
+    loop_env="$("${PYTHON3_CMD}" "${LOOP_STATUS_SCRIPT}" --runs-root "${ROOT_DIR}/my_runs" --format env)"
+    eval "${loop_env}"
+    if [ "${A3HT_LOOP_STOP_CONDITION_MET}" = "1" ]; then
+        printf '%s stop_condition_met=1 action=%s reason=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${A3HT_LOOP_ACTION}" "${A3HT_LOOP_REASON}" >> "${LOG_FILE}"
+        break
+    fi
+    if [ "${A3HT_LOOP_ACTION}" = "wait_active_cohort" ]; then
+        printf '%s action=%s active_cohort=%s reason=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${A3HT_LOOP_ACTION}" "${A3HT_ACTIVE_COHORT_ID}" "${A3HT_LOOP_REASON}" >> "${LOG_FILE}"
+        break
+    fi
     seed_source="next_seed"
     seed="$(peek_retry_seed || true)"
     if [ -n "${seed}" ]; then
@@ -192,7 +208,7 @@ while [ "${submitted}" -lt "${jobs_to_submit}" ]; do
         advance_next_seed "${seed}"
     fi
     submitted=$((submitted + 1))
-    printf '%s planner=%s seed=%s source=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${planner_result}" "${seed}" "${seed_source}" >> "${LOG_FILE}"
+    printf '%s planner=%s seed=%s source=%s action=%s active_cohort=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${planner_result}" "${seed}" "${seed_source}" "${A3HT_LOOP_ACTION}" "${A3HT_ACTIVE_COHORT_ID}" >> "${LOG_FILE}"
     printf '%s submitted job_id=%s seed=%s source=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${job_id}" "${seed}" "${seed_source}" >> "${LOG_FILE}"
 done
 

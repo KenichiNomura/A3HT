@@ -234,6 +234,7 @@ fi
 # shellcheck disable=SC1090
 source "${plan_env}"
 echo "Using simulation plan source: ${A3HT_PLAN_SOURCE}"
+echo "Cohort: id=${A3HT_COHORT_ID} target_evaluable_seeds=${A3HT_COHORT_SEED_TARGET}"
 echo "Plan goal: target_kappa=${A3HT_GOAL_TARGET_KAPPA_W_MK} W/m-K max_rel_uncertainty=${A3HT_GOAL_MAX_REL_UNCERT_PCT}%"
 echo "Plan summary: ${A3HT_REASONING_SUMMARY}"
 

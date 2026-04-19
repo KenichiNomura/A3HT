@@ -87,8 +87,10 @@ based on that installation.
 ## Main Files
 
 - `run.sh`: end-to-end driver for environment checks, optional simulation planning, structure generation, annealing, thermalization, and NEMD
-- `cron_queue.sh`: keeps the PBS queue filled, plans the next run before submission, and prioritizes retry seeds from `.queue_state/resubmit_seeds.txt`
-- `plan_simulation.py`: uses `codex exec` to propose per-run simulation parameters, validates hard constraints, and writes run-local plan artifacts
+- `cron_queue.sh`: drives the autonomous loop by checking cohort stop/wait conditions, planning the next run before submission, and prioritizing retry seeds from `.queue_state/resubmit_seeds.txt`
+- `plan_simulation.py`: uses `codex exec` or active-cohort reuse to choose per-run simulation parameters, validates hard constraints, and writes run-local plan artifacts
+- `loop_status.py`: reports whether the autonomous loop should stop, wait for the active cohort, reuse it, or open a new cohort
+- `autonomy.py`: shared cohort statistics and stop-condition logic
 - `simulation_plan_schema.json`: JSON schema enforced on planner output
 - `prepare_resubmits.py`: finds failed/incomplete runs, purges their run directories, and writes the retry queue for cron
 - `generate_random_carbon.py`: creates a random carbon network from rotated graphene-like flakes
@@ -116,6 +118,7 @@ The planner:
 
 - summarizes recent successful runs from `my_runs/`
 - asks `codex exec` for a structured next-run plan
+- reuses the active cohort parameters when repeated same-parameter seeds are still needed
 - validates the result against the current hard bounds
 - falls back to a conservative default plan if Codex is unavailable or the output is invalid
 
@@ -136,8 +139,17 @@ The current target goal encoded in the planner is:
 
 - thermal conductivity target: `6 W/m-K`
 - relative uncertainty target: `< 10%`
+- minimum evaluable seeds per cohort: `5`
 
-The same physical parameter set may be repeated with different random seeds to estimate uncertainty.
+The same physical parameter set is repeated with different random seeds within a cohort until at least 5 evaluable seeds are available for uncertainty estimation.
+
+The autonomous loop stops submitting new jobs when any cohort reaches:
+
+- mean thermal conductivity `>= 6 W/m-K`
+- relative uncertainty `< 10%`
+- at least `5` evaluable seeds in that cohort
+
+The relative uncertainty is computed from the standard error of the cohort mean thermal conductivity.
 
 ### 2. Generate the initial structure
 
@@ -283,6 +295,8 @@ and planning artifacts:
 - `simulation_plan.env`
 - `simulation_plan.lmp`
 
+These plan artifacts record the cohort id, planner source, target conductivity, target uncertainty, and the minimum evaluable-seed count for the cohort.
+
 and simulation outputs under:
 
 `my_runs/<seed>/data/`
@@ -303,11 +317,18 @@ The repository includes a lightweight PBS queue-filler:
 bash cron_queue.sh
 ```
 
-By default it keeps `A3HT_TARGET_JOBS` jobs in the scheduler and submits `run.sh` with successive seeds from:
+By default it tries to keep up to `A3HT_TARGET_JOBS` jobs in the scheduler, subject to the autonomous loop stop/wait rules, and submits `run.sh` with successive seeds from:
 
 `.queue_state/next_seed`
 
-Before each `qsub`, `cron_queue.sh` creates `my_runs/<seed>/simulation_plan.*` so the submitted job already has a validated parameter set.
+Before each `qsub`, `cron_queue.sh` checks the current cohort status:
+
+- `stop`: no new jobs are submitted because a cohort already meets the target
+- `wait_active_cohort`: no new jobs are submitted because the active cohort already has enough planned/running seeds to reach the minimum cohort size
+- `reuse_active_cohort`: the next seed reuses the active cohort parameters
+- `plan_new_cohort`: a fresh plan is generated for a new cohort
+
+When a submission is needed, `cron_queue.sh` creates `my_runs/<seed>/simulation_plan.*` so the submitted job already has a validated parameter set and cohort assignment.
 
 If:
 
@@ -444,6 +465,7 @@ Outputs include:
 
 - `run.sh` is written for PBS and launches LAMMPS through `mpiexec` or `mpirun`.
 - If `codex exec` is unavailable or fails, `plan_simulation.py` falls back to a conservative default in-bounds plan so the workflow can continue.
+- Cohorts are defined by identical physical simulation parameters; random seeds differ within a cohort.
 - The repository contains local LAMMPS build directories, but the documented requirement is a LAMMPS executable that supports OpenKIM and `fix ehex`.
 - The NEMD method implemented here is a direct heat-flux approach using `eHEX`, not Green-Kubo.
 

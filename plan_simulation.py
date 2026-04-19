@@ -3,22 +3,26 @@
 
 import argparse
 import json
-import math
 import os
 import re
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
+from autonomy import (
+    MIN_COHORT_SUCCESS_SEEDS,
+    TARGET_KAPPA_W_MK,
+    TARGET_RELATIVE_UNCERTAINTY_PCT,
+    cohort_id_from_parameters,
+    collect_run_records,
+    summarize_loop_state,
+)
 
 ROOT = Path(__file__).resolve().parent
 RUNS_ROOT = ROOT / "my_runs"
 SCHEMA_PATH = ROOT / "simulation_plan_schema.json"
-
-TARGET_KAPPA_W_MK = 6.0
-TARGET_RELATIVE_UNCERTAINTY_PCT = 10.0
 
 DEFAULT_PARAMETERS: Dict[str, Any] = {
     "density_g_cm3": 1.5,
@@ -86,83 +90,30 @@ def default_plan(source: str, note: str) -> Dict[str, Any]:
             "goal_max_relative_uncertainty_pct": TARGET_RELATIVE_UNCERTAINTY_PCT,
         },
     }
-
-
-def read_last_kappa(hotcold_file: Path) -> Optional[float]:
-    try:
-        lines = [
-            line.strip()
-            for line in hotcold_file.read_text(encoding="ascii").splitlines()
-            if line.strip() and not line.lstrip().startswith("#")
-        ]
-    except OSError:
-        return None
-    if not lines:
-        return None
-    parts = lines[-1].split()
-    if len(parts) < 6:
-        return None
-    try:
-        return float(parts[5])
-    except ValueError:
-        return None
-
-
-def load_prior_parameters(run_dir: Path) -> Optional[Dict[str, Any]]:
-    plan_json = run_dir / "simulation_plan.json"
-    if not plan_json.is_file():
-        return None
-    try:
-        payload = json.loads(plan_json.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    params = payload.get("recommended_parameters")
-    return params if isinstance(params, dict) else None
-
-
 def collect_history(runs_root: Path, max_history: int) -> Dict[str, Any]:
-    records: List[Dict[str, Any]] = []
-    for run_dir in sorted(runs_root.glob("*"), key=lambda path: int(path.name) if path.name.isdigit() else -1, reverse=True):
-        if not run_dir.is_dir():
+    all_records = collect_run_records(runs_root)
+    recent_successes = []
+    for record in reversed(all_records):
+        if record.get("status") != "SUCCESS":
             continue
-        status_file = run_dir / "run_status.txt"
-        if not status_file.is_file():
-            continue
-        try:
-            status = status_file.read_text(encoding="ascii").strip()
-        except OSError:
-            continue
-        if status != "SUCCESS":
-            continue
-        kappa = read_last_kappa(run_dir / "data" / "gc_edip_hotcold.cont.dat")
-        params = load_prior_parameters(run_dir)
-        record: Dict[str, Any] = {"seed": int(run_dir.name)}
-        if kappa is not None:
-            record["final_kappa_w_mk"] = kappa
+        entry = {"seed": record["seed"], "cohort_id": record.get("cohort_id")}
+        if isinstance(record.get("kappa_w_mk"), (int, float)):
+            entry["final_kappa_w_mk"] = record["kappa_w_mk"]
+        params = record.get("parameters") or {}
         if params:
-            record["parameters"] = {
+            entry["parameters"] = {
                 key: params[key]
                 for key in ("flake_area_a2", "box_x_a", "box_y_a", "box_z_a", "density_g_cm3")
                 if key in params
             }
-        records.append(record)
-        if len(records) >= max_history:
+        recent_successes.append(entry)
+        if len(recent_successes) >= max_history:
             break
-
-    kappas = [item["final_kappa_w_mk"] for item in records if "final_kappa_w_mk" in item]
-    summary: Dict[str, Any] = {"recent_successes": records}
-    if kappas:
-        mean = sum(kappas) / len(kappas)
-        variance = sum((value - mean) ** 2 for value in kappas) / len(kappas)
-        stddev = math.sqrt(variance)
-        summary["recent_kappa_stats"] = {
-            "count": len(kappas),
-            "mean_w_mk": mean,
-            "stddev_w_mk": stddev,
-            "min_w_mk": min(kappas),
-            "max_w_mk": max(kappas),
-        }
-    return summary
+    recent_successes.reverse()
+    return {
+        "recent_successes": recent_successes,
+        "loop_state": summarize_loop_state(all_records),
+    }
 
 
 def planner_prompt(seed: int, history: Dict[str, Any]) -> str:
@@ -170,6 +121,7 @@ def planner_prompt(seed: int, history: Dict[str, Any]) -> str:
         "You are planning the next MD run for this repository.\n\n"
         f"Target goal: reach {TARGET_KAPPA_W_MK:.1f} W/m-K thermal conductivity with relative "
         f"uncertainty below {TARGET_RELATIVE_UNCERTAINTY_PCT:.1f}%.\n"
+        f"Each same-parameter cohort must collect at least {MIN_COHORT_SUCCESS_SEEDS} evaluable seeds.\n"
         f"This plan is for run seed {seed}. The same physical parameter set may be reused across "
         "different random seeds to estimate uncertainty.\n\n"
         "Hard constraints:\n"
@@ -298,10 +250,37 @@ def validate_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def build_reuse_plan(seed: int, active_cohort: Dict[str, Any]) -> Dict[str, Any]:
+    parameters = dict(active_cohort["parameters"])
+    needed = max(MIN_COHORT_SUCCESS_SEEDS - int(active_cohort.get("evaluable_success_count") or 0), 0)
+    return {
+        "reasoning_summary": (
+            "Reuse the active cohort parameters to build out the minimum repeated-seed set "
+            "needed for uncertainty estimation."
+        ),
+        "uncertainty_strategy": (
+            "Keep the physical parameters fixed for this cohort and vary only the random seed "
+            "until at least {} evaluable seeds are available.".format(MIN_COHORT_SUCCESS_SEEDS)
+        ),
+        "recommended_parameters": parameters,
+        "_meta": {
+            "planner_source": "cohort_reuse",
+            "goal_target_kappa_w_mk": TARGET_KAPPA_W_MK,
+            "goal_max_relative_uncertainty_pct": TARGET_RELATIVE_UNCERTAINTY_PCT,
+            "cohort_id": active_cohort["cohort_id"],
+            "cohort_seed_target": MIN_COHORT_SUCCESS_SEEDS,
+            "cohort_repeat_seed": seed,
+            "cohort_remaining_needed_evaluable": needed,
+        },
+    }
+
+
 def plan_to_env(seed: int, plan: Dict[str, Any]) -> Dict[str, str]:
     params = plan["recommended_parameters"]
     return {
         "A3HT_PLAN_SOURCE": plan["_meta"]["planner_source"],
+        "A3HT_COHORT_ID": plan["_meta"]["cohort_id"],
+        "A3HT_COHORT_SEED_TARGET": str(plan["_meta"]["cohort_seed_target"]),
         "A3HT_GOAL_TARGET_KAPPA_W_MK": f"{plan['_meta']['goal_target_kappa_w_mk']:.6f}",
         "A3HT_GOAL_MAX_REL_UNCERT_PCT": f"{plan['_meta']['goal_max_relative_uncertainty_pct']:.6f}",
         "A3HT_REASONING_SUMMARY": plan["reasoning_summary"].replace("\n", " "),
@@ -386,23 +365,29 @@ def main() -> int:
     run_dir.mkdir(parents=True, exist_ok=True)
 
     history = collect_history(args.runs_root.resolve(), args.max_history)
+    loop_state = history["loop_state"]
     plan = default_plan(
         source="fallback_default",
         note="Default in-bounds plan used because no codex-generated plan was available.",
     )
 
-    if not args.disable_codex:
+    if loop_state.get("action") == "reuse_active_cohort" and loop_state.get("active_cohort"):
+        plan = build_reuse_plan(args.seed, loop_state["active_cohort"])
+    elif not args.disable_codex:
         with tempfile.TemporaryDirectory(prefix="a3ht-plan-", dir=str(run_dir)) as tmp_dir:
             output_path = Path(tmp_dir) / "codex_plan.json"
             try:
                 candidate = run_codex(args.seed, history, output_path)
                 validated = validate_plan(candidate)
+                cohort_id = cohort_id_from_parameters(validated["recommended_parameters"])
                 plan = {
                     **validated,
                     "_meta": {
                         "planner_source": "codex_exec",
                         "goal_target_kappa_w_mk": TARGET_KAPPA_W_MK,
                         "goal_max_relative_uncertainty_pct": TARGET_RELATIVE_UNCERTAINTY_PCT,
+                        "cohort_id": cohort_id,
+                        "cohort_seed_target": MIN_COHORT_SUCCESS_SEEDS,
                     },
                 }
             except Exception as exc:
@@ -412,6 +397,9 @@ def main() -> int:
                         "Default in-bounds plan used because codex planning failed: {}".format(exc)
                     ),
                 )
+
+    plan["_meta"].setdefault("cohort_id", cohort_id_from_parameters(plan["recommended_parameters"]))
+    plan["_meta"].setdefault("cohort_seed_target", MIN_COHORT_SUCCESS_SEEDS)
 
     env_values = plan_to_env(args.seed, plan)
 
