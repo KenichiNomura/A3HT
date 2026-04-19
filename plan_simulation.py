@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -23,6 +24,7 @@ from autonomy import (
 ROOT = Path(__file__).resolve().parent
 RUNS_ROOT = ROOT / "my_runs"
 SCHEMA_PATH = ROOT / "simulation_plan_schema.json"
+DEFAULT_CODEX_BIN = "/home/knomura/.nvm/versions/node/v24.14.1/bin/codex"
 
 DEFAULT_PARAMETERS: Dict[str, Any] = {
     "density_g_cm3": 1.5,
@@ -72,6 +74,11 @@ def parse_args() -> argparse.Namespace:
         "--disable-codex",
         action="store_true",
         help="skip codex exec and emit the validated default plan",
+    )
+    parser.add_argument(
+        "--codex-bin",
+        default=None,
+        help="explicit path or command name for codex; default: A3HT_CODEX_BIN, then PATH, then built-in fallback",
     )
     return parser.parse_args()
 
@@ -138,10 +145,39 @@ def planner_prompt(seed: int, history: Dict[str, Any]) -> str:
     )
 
 
-def run_codex(seed: int, history: Dict[str, Any], output_path: Path) -> Dict[str, Any]:
+def resolve_codex_bin(explicit_codex_bin: str) -> str:
+    candidates = []
+    if explicit_codex_bin:
+        candidates.append(explicit_codex_bin)
+    env_codex_bin = os.environ.get("A3HT_CODEX_BIN")
+    if env_codex_bin:
+        candidates.append(env_codex_bin)
+    path_codex = shutil.which("codex")
+    if path_codex:
+        candidates.append(path_codex)
+    candidates.append(DEFAULT_CODEX_BIN)
+
+    for candidate in candidates:
+        if not candidate:
+            continue
+        if os.path.isabs(candidate):
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                return candidate
+        else:
+            resolved = shutil.which(candidate)
+            if resolved:
+                return resolved
+
+    raise RuntimeError(
+        "could not locate codex; set A3HT_CODEX_BIN or pass --codex-bin with the full path to the codex executable"
+    )
+
+
+def run_codex(seed: int, history: Dict[str, Any], output_path: Path, explicit_codex_bin: str) -> Dict[str, Any]:
     prompt = planner_prompt(seed, history)
+    codex_bin = resolve_codex_bin(explicit_codex_bin)
     cmd = [
-        "codex",
+        codex_bin,
         "exec",
         "-C",
         str(ROOT),
@@ -377,7 +413,7 @@ def main() -> int:
         with tempfile.TemporaryDirectory(prefix="a3ht-plan-", dir=str(run_dir)) as tmp_dir:
             output_path = Path(tmp_dir) / "codex_plan.json"
             try:
-                candidate = run_codex(args.seed, history, output_path)
+                candidate = run_codex(args.seed, history, output_path, args.codex_bin)
                 validated = validate_plan(candidate)
                 cohort_id = cohort_id_from_parameters(validated["recommended_parameters"])
                 plan = {

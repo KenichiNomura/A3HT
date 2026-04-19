@@ -68,6 +68,14 @@ Recommended practical setup:
 - a working `codex exec` installation if you want AI-generated plans rather than fallback defaults
 - a PBS environment if you want to use the included queue-filler unchanged
 
+If `codex` is installed outside the default non-interactive `PATH`, set:
+
+```bash
+export A3HT_CODEX_BIN=/home/knomura/.nvm/versions/node/v24.14.1/bin/codex
+```
+
+This is especially important for cron and PBS jobs, which often do not inherit your interactive shell startup files.
+
 The default run script expects the LAMMPS executable at:
 
 `lammps-30Mar2026/build-cray-shared/lmp`
@@ -316,6 +324,15 @@ The repository includes a lightweight PBS queue-filler:
 ```bash
 bash cron_queue.sh
 ```
+
+If the planner reports that `codex` is missing in cron or PBS, export the Codex binary path before launching the queue filler:
+
+```bash
+export A3HT_CODEX_BIN=/home/knomura/.nvm/versions/node/v24.14.1/bin/codex
+bash cron_queue.sh
+```
+
+`cron_queue.sh` forwards `A3HT_CODEX_BIN` into `qsub`, so the submitted batch job can resolve the same Codex executable if `run.sh` needs to regenerate planning artifacts.
 
 By default it tries to keep up to `A3HT_TARGET_JOBS` jobs in the scheduler, subject to the autonomous loop stop/wait rules, and submits `run.sh` with successive seeds from:
 

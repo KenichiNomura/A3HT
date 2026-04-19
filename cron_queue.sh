@@ -7,6 +7,7 @@ PLANNER_SCRIPT="${A3HT_PLANNER_SCRIPT:-${ROOT_DIR}/plan_simulation.py}"
 LOOP_STATUS_SCRIPT="${A3HT_LOOP_STATUS_SCRIPT:-${ROOT_DIR}/loop_status.py}"
 JOB_NAME="${A3HT_JOB_NAME:-a3ht}"
 TARGET_JOBS="${A3HT_TARGET_JOBS:-10}"
+CODEX_BIN_VALUE="${A3HT_CODEX_BIN:-}"
 STATE_DIR="${A3HT_STATE_DIR:-${ROOT_DIR}/.queue_state}"
 LOCK_DIR="${STATE_DIR}/lock"
 COUNTER_FILE="${STATE_DIR}/next_seed"
@@ -198,7 +199,11 @@ while [ "${submitted}" -lt "${jobs_to_submit}" ]; do
         printf '%s planning failed for seed=%s source=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${seed}" "${seed_source}" >> "${LOG_FILE}"
         exit 1
     fi
-    if ! job_id="$("${QSUB_CMD}" -N "${JOB_NAME}" -v "A3HT_SEED=${seed}" "${JOB_SCRIPT}")"; then
+    qsub_vars="A3HT_SEED=${seed}"
+    if [ -n "${CODEX_BIN_VALUE}" ]; then
+        qsub_vars="${qsub_vars},A3HT_CODEX_BIN=${CODEX_BIN_VALUE}"
+    fi
+    if ! job_id="$("${QSUB_CMD}" -N "${JOB_NAME}" -v "${qsub_vars}" "${JOB_SCRIPT}")"; then
         printf '%s qsub failed for seed=%s source=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${seed}" "${seed_source}" >> "${LOG_FILE}"
         exit 1
     fi
