@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "reasoning_summary",
+    "uncertainty_strategy",
+    "recommended_parameters"
+  ],
+  "properties": {
+    "reasoning_summary": {
+      "type": "string"
+    },
+    "uncertainty_strategy": {
+      "type": "string"
+    },
+    "recommended_parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "density_g_cm3",
+        "flake_area_a2",
+        "box_x_a",
+        "box_y_a",
+        "box_z_a",
+        "anneal_timestep_ps",
+        "anneal_10ps_steps",
+        "anneal_50ps_steps",
+        "thermalize_temperature_k",
+        "thermalize_timestep_ps",
+        "thermalize_nvt_steps",
+        "thermalize_npt_steps",
+        "thermalize_nve_steps",
+        "nemd_timestep_ps",
+        "nemd_slab_width_a",
+        "nemd_freeze_width_a",
+        "nemd_bin_size_a",
+        "nemd_eflux_ev_ps",
+        "nemd_steps"
+      ],
+      "properties": {
+        "density_g_cm3": {
+          "type": "number",
+          "exclusiveMinimum": 0.0
+        },
+        "flake_area_a2": {
+          "type": "number",
+          "minimum": 10.0,
+          "maximum": 30.0
+        },
+        "box_x_a": {
+          "type": "number",
+          "minimum": 20.0,
+          "maximum": 50.0
+        },
+        "box_y_a": {
+          "type": "number",
+          "minimum": 20.0,
+          "maximum": 50.0
+        },
+        "box_z_a": {
+          "type": "number",
+          "minimum": 40.0,
+          "maximum": 100.0
+        },
+        "anneal_timestep_ps": {
+          "type": "number",
+          "exclusiveMinimum": 0.0
+        },
+        "anneal_10ps_steps": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "anneal_50ps_steps": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "thermalize_temperature_k": {
+          "type": "number",
+          "exclusiveMinimum": 0.0
+        },
+        "thermalize_timestep_ps": {
+          "type": "number",
+          "exclusiveMinimum": 0.0
+        },
+        "thermalize_nvt_steps": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "thermalize_npt_steps": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "thermalize_nve_steps": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "nemd_timestep_ps": {
+          "type": "number",
+          "exclusiveMinimum": 0.0
+        },
+        "nemd_slab_width_a": {
+          "type": "number",
+          "exclusiveMinimum": 0.0
+        },
+        "nemd_freeze_width_a": {
+          "type": "number",
+          "exclusiveMinimum": 0.0
+        },
+        "nemd_bin_size_a": {
+          "type": "number",
+          "exclusiveMinimum": 0.0
+        },
+        "nemd_eflux_ev_ps": {
+          "type": "number",
+          "exclusiveMinimum": 0.0
+        },
+        "nemd_steps": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    }
+  }
+}

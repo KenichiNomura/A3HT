@@ -51,6 +51,7 @@ trap finish_run EXIT
 default_lammps_dir="${rootdir}/lammps-30Mar2026/build-cray-shared"
 LAMMPS_DIR="${LAMMPS_DIR:-${default_lammps_dir}}"
 LAMMPS_BIN="${LAMMPS_BIN:-${LAMMPS_DIR}/lmp}"
+PLANNER_SCRIPT="${A3HT_PLANNER_SCRIPT:-${rootdir}/plan_simulation.py}"
 echo "${LAMMPS_BIN}"
 
 export PATH="${LAMMPS_DIR}:$PATH"
@@ -119,6 +120,9 @@ fi
 run_dir="${rootdir}/my_runs/${seed}"
 status_file="${run_dir}/run_status.txt"
 failure_file="${run_dir}/run_failure.txt"
+plan_json="${run_dir}/simulation_plan.json"
+plan_env="${run_dir}/simulation_plan.env"
+plan_lmp="${run_dir}/simulation_plan.lmp"
 mkdir -p "${run_dir}"
 printf 'RUNNING\n' > "${status_file}"
 rm -f "${failure_file}"
@@ -207,8 +211,40 @@ fi
 
 cd "${run_dir}"
 
+stage="simulation_planning"
+if [[ ! -f "${plan_env}" || ! -f "${plan_lmp}" || ! -f "${plan_json}" ]]; then
+    if ! command -v python3 >/dev/null 2>&1; then
+        fail "python3 is required to generate simulation planning artifacts"
+    fi
+    if [[ ! -f "${PLANNER_SCRIPT}" ]]; then
+        fail "planner script not found: ${PLANNER_SCRIPT}"
+    fi
+    if ! python3 "${PLANNER_SCRIPT}" --seed "${seed}" --run-dir "${run_dir}"; then
+        fail "simulation planner failed for seed ${seed}"
+    fi
+fi
+
+if [[ ! -f "${plan_env}" ]]; then
+    fail "simulation plan env file not found: ${plan_env}"
+fi
+if [[ ! -f "${plan_lmp}" ]]; then
+    fail "simulation plan LAMMPS include not found: ${plan_lmp}"
+fi
+
+# shellcheck disable=SC1090
+source "${plan_env}"
+echo "Using simulation plan source: ${A3HT_PLAN_SOURCE}"
+echo "Plan goal: target_kappa=${A3HT_GOAL_TARGET_KAPPA_W_MK} W/m-K max_rel_uncertainty=${A3HT_GOAL_MAX_REL_UNCERT_PCT}%"
+echo "Plan summary: ${A3HT_REASONING_SUMMARY}"
+
 stage="structure_generation"
-${rootdir}/generate_random_carbon.py --box 20 20 40 --density 1.5 --seed "${seed}" --output random_carbon.extxyz --flake-area 20 --format lammps
+${rootdir}/generate_random_carbon.py \
+    --box "${A3HT_STRUCTURE_BOX_X_A}" "${A3HT_STRUCTURE_BOX_Y_A}" "${A3HT_STRUCTURE_BOX_Z_A}" \
+    --density "${A3HT_STRUCTURE_DENSITY_G_CM3}" \
+    --seed "${seed}" \
+    --output random_carbon.extxyz \
+    --flake-area "${A3HT_FLAKE_AREA_A2}" \
+    --format lammps
 mv random_carbon.extxyz random_carbon.dat
 
 stage="anneal"

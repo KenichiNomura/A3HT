@@ -11,19 +11,21 @@ An end-to-end workflow for turning disordered carbon structures into thermal-con
 
 This repository combines atomistic simulation, transport calculations, and data-driven analysis:
 
+- simulation planning with a Codex-based MD review agent
 - random glassy-carbon structure generation
 - high-temperature annealing with the Marks 2000 EDIP OpenKIM potential
 - 300 K equilibration and NEMD thermal conductivity calculations in LAMMPS
 - structural analysis of annealed and driven configurations
 - feature-table generation for downstream ML models
 
-> In short: generate structure -> anneal -> thermalize -> drive heat flux with `eHEX` -> analyze -> train.
+> In short: plan -> generate structure -> anneal -> thermalize -> drive heat flux with `eHEX` -> analyze -> train.
 
 ## A3HT At A Glance
 
 | Component | Role |
 | --- | --- |
 | `generate_random_carbon.py` | Builds the initial disordered carbon network |
+| `plan_simulation.py` | Proposes an in-bounds simulation plan for each run |
 | `anneal.in` | Reshapes the network through staged high-temperature annealing |
 | `thermalize.in` | Brings the annealed sample to a stable 300 K state |
 | `nemd.in` | Imposes a heat flux and estimates thermal conductivity |
@@ -33,12 +35,13 @@ This repository combines atomistic simulation, transport calculations, and data-
 
 The simulation workflow in this repo is:
 
-1. Generate a random carbon starting structure as small graphene-like flakes.
-2. Anneal the structure at high temperature with the OpenKIM EDIP carbon potential.
-3. Thermalize the annealed structure at 300 K.
-4. Run NEMD using the `eHEX` algorithm to impose a heat flux and estimate thermal conductivity.
-5. Analyze annealed and NEMD structures.
-6. Build an ML feature table and train an XGBoost regressor on the resulting dataset.
+1. Propose a simulation plan for the next run from recent MD results and the current target goal.
+2. Generate a random carbon starting structure as small graphene-like flakes.
+3. Anneal the structure at high temperature with the OpenKIM EDIP carbon potential.
+4. Thermalize the annealed structure at 300 K.
+5. Run NEMD using the `eHEX` algorithm to impose a heat flux and estimate thermal conductivity.
+6. Analyze annealed and NEMD structures.
+7. Build an ML feature table and train an XGBoost regressor on the resulting dataset.
 
 ## Requirements
 
@@ -55,13 +58,14 @@ You will need:
 - Python packages:
   - `numpy`
   - `xgboost` for model training
-- A Slurm environment if you want to run `run.sh` unchanged, because it uses `srun`
+- A PBS environment if you want to use `cron_queue.sh` unchanged
 
 Recommended practical setup:
 
 - a LAMMPS build linked cleanly against OpenKIM
 - the Marks 2000 EDIP/C model installed in your user KIM collection
 - multiple independent seeds in `my_runs/` if you want meaningful ML training data
+- a working `codex exec` installation if you want AI-generated plans rather than fallback defaults
 - a PBS environment if you want to use the included queue-filler unchanged
 
 The default run script expects the LAMMPS executable at:
@@ -82,8 +86,10 @@ based on that installation.
 
 ## Main Files
 
-- `run.sh`: end-to-end driver for structure generation, annealing, thermalization, and NEMD
-- `cron_queue.sh`: keeps the PBS queue filled and now prioritizes retry seeds from `.queue_state/resubmit_seeds.txt`
+- `run.sh`: end-to-end driver for environment checks, optional simulation planning, structure generation, annealing, thermalization, and NEMD
+- `cron_queue.sh`: keeps the PBS queue filled, plans the next run before submission, and prioritizes retry seeds from `.queue_state/resubmit_seeds.txt`
+- `plan_simulation.py`: uses `codex exec` to propose per-run simulation parameters, validates hard constraints, and writes run-local plan artifacts
+- `simulation_plan_schema.json`: JSON schema enforced on planner output
 - `prepare_resubmits.py`: finds failed/incomplete runs, purges their run directories, and writes the retry queue for cron
 - `generate_random_carbon.py`: creates a random carbon network from rotated graphene-like flakes
 - `anneal.in`: high-temperature annealing schedule using the Marks 2000 EDIP/C OpenKIM model
@@ -96,32 +102,68 @@ based on that installation.
 
 ## Simulation Workflow
 
-The simulation side of A3HT is organized as a compact three-stage pipeline before analysis: build a candidate carbon network, structurally relax it through annealing and equilibration, then measure transport under a controlled non-equilibrium heat flux.
+The simulation side of A3HT is organized as a compact planned pipeline before analysis: propose the next in-bounds run, build a candidate carbon network, structurally relax it through annealing and equilibration, then measure transport under a controlled non-equilibrium heat flux.
 
-### 1. Generate the initial structure
+### 1. Plan the next simulation
+
+`cron_queue.sh` calls the planner before `qsub`, and `run.sh` calls it after environment checks pass if the plan artifacts are still missing:
+
+```bash
+python3 plan_simulation.py --seed 123 --run-dir my_runs/123
+```
+
+The planner:
+
+- summarizes recent successful runs from `my_runs/`
+- asks `codex exec` for a structured next-run plan
+- validates the result against the current hard bounds
+- falls back to a conservative default plan if Codex is unavailable or the output is invalid
+
+Each run gets:
+
+- `simulation_plan.json`
+- `simulation_plan.env`
+- `simulation_plan.lmp`
+
+Current hard geometry constraints are:
+
+- flake area: `10-30 A^2`
+- box `x`: `20-50 A`
+- box `y`: `20-50 A`
+- box `z`: `40-100 A`
+
+The current target goal encoded in the planner is:
+
+- thermal conductivity target: `6 W/m-K`
+- relative uncertainty target: `< 10%`
+
+The same physical parameter set may be repeated with different random seeds to estimate uncertainty.
+
+### 2. Generate the initial structure
 
 `run.sh` calls:
 
 ```bash
 ./generate_random_carbon.py \
-  --box 20 20 40 \
-  --density 1.5 \
+  --box "${A3HT_STRUCTURE_BOX_X_A}" "${A3HT_STRUCTURE_BOX_Y_A}" "${A3HT_STRUCTURE_BOX_Z_A}" \
+  --density "${A3HT_STRUCTURE_DENSITY_G_CM3}" \
   --seed 123 \
   --output random_carbon.extxyz \
-  --flake-area 20 \
+  --flake-area "${A3HT_FLAKE_AREA_A2}" \
   --format lammps
 ```
 
 The generated file is then renamed to `random_carbon.dat` and used as the LAMMPS input structure.
 
-### 2. Anneal the structure
+### 3. Anneal the structure
 
 `anneal.in`:
 
+- includes `simulation_plan.lmp`
 - reads `random_carbon.dat`
 - initializes the OpenKIM model `EDIP_LAMMPS_Marks_2000_C__MO_374144505645_000`
 - minimizes the initial configuration
-- applies staged NVT annealing
+- applies staged NVT annealing with plan-provided timestep, run length, and velocity seed
 
 The annealing schedule is:
 
@@ -140,14 +182,15 @@ Outputs include:
 - `data/anneal_gc_edip_multistage.lammpstrj`
 - `data/anneal_gc_edip_multistage_coordination.dat`
 
-### 3. Thermalize the annealed structure
+### 4. Thermalize the annealed structure
 
 `thermalize.in`:
 
+- includes `simulation_plan.lmp`
 - reads `gc_edip.restart`
 - shifts the periodic cell so wrapped `z` coordinates stay non-negative
 - minimizes the annealed structure
-- equilibrates at 300 K with repeated NVT, NPT, and NVE stages
+- equilibrates with plan-provided temperature, timestep, stage lengths, and velocity seed
 
 This separates structural preparation from the transport calculation so the NEMD run starts from an already relaxed state.
 
@@ -156,10 +199,11 @@ Outputs include:
 - `data/gc_edip_thermalize.restart`
 - `data/gc_edip_thermalize.data`
 
-### 4. Run NEMD thermal conductivity
+### 5. Run NEMD thermal conductivity
 
 `nemd.in`:
 
+- includes `simulation_plan.lmp`
 - reads `gc_edip.restart`
 - defines frozen slabs at the two ends of the box
 - defines hot and cold regions next to the frozen slabs
@@ -167,8 +211,8 @@ Outputs include:
 - applies heat exchange with:
 
 ```lammps
-fix hotflux all ehex 1000 ${eflux} region hot
-fix coldflux all ehex 1000 -${eflux} region cold
+fix hotflux all ehex 1000 ${nemd_eflux_ev_ps} region hot
+fix coldflux all ehex 1000 -${nemd_eflux_ev_ps} region cold
 ```
 
 - computes a temperature profile along `z`
@@ -177,7 +221,7 @@ fix coldflux all ehex 1000 -${eflux} region cold
 
 The transport setup uses frozen boundary slabs plus hot/cold exchange regions, so the calculation is a direct non-equilibrium estimate rather than an equilibrium fluctuation method.
 
-Important NEMD settings in the current script:
+Important NEMD settings are now provided by the per-run plan. The default fallback plan uses:
 
 - `dt = 0.0001 ps`
 - `slabw = 5.0 A`
@@ -201,7 +245,7 @@ Outputs include:
 
 ## Running the Full Workflow
 
-For a standard run, you only need a seed, a valid LAMMPS executable, and the OpenKIM model installed.
+For a standard run, you only need a seed, a valid LAMMPS executable, and the OpenKIM model installed. If the environment checks pass and a per-run plan does not already exist, `run.sh` will generate one automatically.
 
 The main driver is:
 
@@ -212,7 +256,7 @@ bash run.sh --seed 123 --ntasks 32 --processors auto
 Options supported by `run.sh`:
 
 - `--seed N`: random seed for the generated carbon structure
-- `--ntasks N`: MPI task count passed to `srun`
+- `--ntasks N`: MPI task count passed to `mpiexec` or `mpirun`
 - `--processors auto|Px,Py,Pz`: LAMMPS processor grid
 
 Example with an explicit processor grid:
@@ -232,6 +276,12 @@ with logs:
 - `nemd.log`
 - `run_status.txt`
 - `run_failure.txt` when a run exits unsuccessfully
+
+and planning artifacts:
+
+- `simulation_plan.json`
+- `simulation_plan.env`
+- `simulation_plan.lmp`
 
 and simulation outputs under:
 
@@ -256,6 +306,8 @@ bash cron_queue.sh
 By default it keeps `A3HT_TARGET_JOBS` jobs in the scheduler and submits `run.sh` with successive seeds from:
 
 `.queue_state/next_seed`
+
+Before each `qsub`, `cron_queue.sh` creates `my_runs/<seed>/simulation_plan.*` so the submitted job already has a validated parameter set.
 
 If:
 
@@ -391,6 +443,7 @@ Outputs include:
 ## Notes and Assumptions
 
 - `run.sh` is written for PBS and launches LAMMPS through `mpiexec` or `mpirun`.
+- If `codex exec` is unavailable or fails, `plan_simulation.py` falls back to a conservative default in-bounds plan so the workflow can continue.
 - The repository contains local LAMMPS build directories, but the documented requirement is a LAMMPS executable that supports OpenKIM and `fix ehex`.
 - The NEMD method implemented here is a direct heat-flux approach using `eHEX`, not Green-Kubo.
 
@@ -403,6 +456,9 @@ my_runs/
     thermalize.log
     nemd.log
     gc_edip.restart
+    simulation_plan.json
+    simulation_plan.env
+    simulation_plan.lmp
     data/
       anneal_gc_edip_multistage.data
       anneal_gc_edip_multistage.lammpstrj

@@ -7,23 +7,12 @@ atom_style      atomic
 variable        procx index *
 variable        procy index *
 variable        procz index *
+include         simulation_plan.lmp
 
 variable        kim_model string EDIP_LAMMPS_Marks_2000_C__MO_374144505645_000
 
 # Use the Marks 2000 EDIP/C OpenKIM model for carbon.
 kim             init ${kim_model} metal
-
-# Simulation controls
-variable        dt equal 0.0001
-
-# NEMD controls
-variable        slabw equal 5.0           # hot/cold slab width in Angstrom
-variable        freezew equal 5.0         # frozen slab width in Angstrom
-variable        binsize equal 5.0         # temperature profile bin size in Angstrom
-variable        eflux equal 0.2          # eV/ps injected to hot slab, removed from cold slab  # good for glassycarbon3.xyz
-
-# Run lengths
-variable        nemd_steps equal 1000000   # 200 ps
 
 variable        outdir string data
 shell           mkdir ${outdir}
@@ -43,7 +32,7 @@ neigh_modify    delay 0 every 1 check yes
 
 thermo          1000
 thermo_modify   flush yes
-timestep        ${dt}
+timestep        ${nemd_timestep_ps}
 
 compute         zmin all reduce min z
 run             0
@@ -56,11 +45,11 @@ change_box      all z final ${zlo_shifted} ${zhi_shifted} remap units box
 kim             interactions C
 
 # Geometry used for the frozen boundaries, source/sink, and conductivity estimate.
-variable        zfreeze_bot_hi equal zlo+v_freezew
-variable        zfreeze_top_lo equal zhi-v_freezew
+variable        zfreeze_bot_hi equal zlo+v_nemd_freeze_width_a
+variable        zfreeze_top_lo equal zhi-v_nemd_freeze_width_a
 variable        zcold_lo equal v_zfreeze_bot_hi
-variable        zcold_hi equal v_zfreeze_bot_hi+v_slabw
-variable        zhot_lo equal v_zfreeze_top_lo-v_slabw
+variable        zcold_hi equal v_zfreeze_bot_hi+v_nemd_slab_width_a
+variable        zhot_lo equal v_zfreeze_top_lo-v_nemd_slab_width_a
 variable        zhot_hi equal v_zfreeze_top_lo
 variable        zhot_ctr equal 0.5*(v_zhot_lo+v_zhot_hi)
 variable        zcold_ctr equal 0.5*(v_zcold_lo+v_zcold_hi)
@@ -93,14 +82,14 @@ fix             freeze frozen setforce 0.0 0.0 0.0
 fix             int all nve
 #fix             hotflux hot heat 1000 ${eflux} region hot
 #fix             coldflux cold heat 1000 -${eflux} region cold
-fix             hotflux all ehex 1000 ${eflux} region hot
-fix             coldflux all ehex 1000 -${eflux} region cold
+fix             hotflux all ehex 1000 ${nemd_eflux_ev_ps} region hot
+fix             coldflux all ehex 1000 -${nemd_eflux_ev_ps} region cold
 
 compute         Thot hot temp/region hot
 compute         Tcold cold temp/region cold
 compute         keatom mobile ke/atom
 variable        atemp atom c_keatom/(1.5*8.617333262e-5)
-compute         zchunks all chunk/atom bin/1d z lower ${binsize} units box
+compute         zchunks all chunk/atom bin/1d z lower ${nemd_bin_size_a} units box
 
 fix             prof mobile ave/chunk 100 1000 100000 zchunks v_atemp file ${outdir}/gc_edip_Tprofile.cont.dat
 
@@ -111,7 +100,7 @@ fix             hotcold_avg all ave/time 100 10 1000 c_Thot c_Tcold ave running 
 # The plate-to-plate separation is measured between the hot and cold slab centers.
 # With frozen end slabs, the imposed heat current traverses the sample only once.
 variable        dT equal f_hotcold_avg[1]-f_hotcold_avg[2]
-variable        Jz equal abs(${eflux})/v_area
+variable        Jz equal abs(${nemd_eflux_ev_ps})/v_area
 # Avoid aborting when the running average has not yet developed a temperature
 # difference; report zero conductivity until the gradient is non-zero.
 variable        kappa equal ternary(abs(v_dT) > 1.0e-12, 1602.176634*v_Jz*v_dz/v_dT, 0.0)

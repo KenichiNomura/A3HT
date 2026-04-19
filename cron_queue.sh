@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="/lus/eagle/projects/uMLIP-PET-FT/knomura/a3ht"
 JOB_SCRIPT="${A3HT_JOB_SCRIPT:-${ROOT_DIR}/run.sh}"
+PLANNER_SCRIPT="${A3HT_PLANNER_SCRIPT:-${ROOT_DIR}/plan_simulation.py}"
 JOB_NAME="${A3HT_JOB_NAME:-a3ht}"
 TARGET_JOBS="${A3HT_TARGET_JOBS:-10}"
 STATE_DIR="${A3HT_STATE_DIR:-${ROOT_DIR}/.queue_state}"
@@ -128,9 +129,15 @@ count_active_jobs() {
 QSUB_CMD="$(require_command qsub)"
 QSTAT_CMD="$(require_command qstat)"
 QSELECT_CMD="$(find_command qselect || true)"
+PYTHON3_CMD="$(require_command python3)"
 
 if [ ! -f "${JOB_SCRIPT}" ]; then
     printf '%s job script not found: %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${JOB_SCRIPT}" >> "${LOG_FILE}"
+    exit 1
+fi
+
+if [ ! -f "${PLANNER_SCRIPT}" ]; then
+    printf '%s planner script not found: %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${PLANNER_SCRIPT}" >> "${LOG_FILE}"
     exit 1
 fi
 
@@ -169,6 +176,12 @@ while [ "${submitted}" -lt "${jobs_to_submit}" ]; do
     else
         seed="$(peek_next_seed)"
     fi
+    run_dir="${ROOT_DIR}/my_runs/${seed}"
+    mkdir -p "${run_dir}"
+    if ! planner_result="$("${PYTHON3_CMD}" "${PLANNER_SCRIPT}" --seed "${seed}" --run-dir "${run_dir}")"; then
+        printf '%s planning failed for seed=%s source=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${seed}" "${seed_source}" >> "${LOG_FILE}"
+        exit 1
+    fi
     if ! job_id="$("${QSUB_CMD}" -N "${JOB_NAME}" -v "A3HT_SEED=${seed}" "${JOB_SCRIPT}")"; then
         printf '%s qsub failed for seed=%s source=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${seed}" "${seed_source}" >> "${LOG_FILE}"
         exit 1
@@ -179,6 +192,7 @@ while [ "${submitted}" -lt "${jobs_to_submit}" ]; do
         advance_next_seed "${seed}"
     fi
     submitted=$((submitted + 1))
+    printf '%s planner=%s seed=%s source=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${planner_result}" "${seed}" "${seed_source}" >> "${LOG_FILE}"
     printf '%s submitted job_id=%s seed=%s source=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${job_id}" "${seed}" "${seed_source}" >> "${LOG_FILE}"
 done
 
