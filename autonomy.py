@@ -4,6 +4,7 @@
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -13,7 +14,8 @@ RUNS_ROOT = ROOT / "my_runs"
 
 TARGET_KAPPA_W_MK = 6.0
 TARGET_RELATIVE_UNCERTAINTY_PCT = 10.0
-MIN_COHORT_SUCCESS_SEEDS = 5
+MIN_COHORT_SUCCESS_SEEDS = 10
+MAX_SIMULTANEOUS_COHORTS = int(os.environ.get("A3HT_MAX_SIMULTANEOUS_COHORTS", "3"))
 
 
 def read_text(path: Path) -> Optional[str]:
@@ -116,6 +118,7 @@ def summarize_loop_state(
     target_kappa_w_mk: float = TARGET_KAPPA_W_MK,
     target_relative_uncertainty_pct: float = TARGET_RELATIVE_UNCERTAINTY_PCT,
     min_cohort_success_seeds: int = MIN_COHORT_SUCCESS_SEEDS,
+    max_simultaneous_cohorts: int = MAX_SIMULTANEOUS_COHORTS,
 ) -> Dict[str, Any]:
     cohorts = {}  # type: Dict[str, Dict[str, Any]]
     for record in records:
@@ -146,7 +149,7 @@ def summarize_loop_state(
             cohort["success_count"] += 1
         elif status == "FAILED":
             cohort["failed_count"] += 1
-        else:
+        elif status == "RUNNING":
             cohort["pending_count"] += 1
 
         kappa = record.get("kappa_w_mk")
@@ -204,10 +207,12 @@ def summarize_loop_state(
             "target_kappa_w_mk": target_kappa_w_mk,
             "target_relative_uncertainty_pct": target_relative_uncertainty_pct,
             "min_cohort_success_seeds": min_cohort_success_seeds,
+            "max_simultaneous_cohorts": max_simultaneous_cohorts,
             "stop_condition_met": True,
             "action": "stop",
             "reason": "A cohort satisfied the target conductivity and uncertainty thresholds.",
-            "active_cohort": stop_cohort,
+            "selected_cohort": stop_cohort,
+            "active_cohorts": [],
             "cohorts": cohort_list,
         }
 
@@ -216,33 +221,51 @@ def summarize_loop_state(
             "target_kappa_w_mk": target_kappa_w_mk,
             "target_relative_uncertainty_pct": target_relative_uncertainty_pct,
             "min_cohort_success_seeds": min_cohort_success_seeds,
+            "max_simultaneous_cohorts": max_simultaneous_cohorts,
             "stop_condition_met": False,
             "action": "plan_new_cohort",
             "reason": "No existing cohort plans were found.",
-            "active_cohort": None,
+            "selected_cohort": None,
+            "active_cohorts": [],
             "cohorts": cohort_list,
         }
 
-    active_cohort = cohort_list[-1]
-    evaluable = active_cohort["evaluable_success_count"]
-    pending = active_cohort["pending_count"]
-    if evaluable >= min_cohort_success_seeds:
+    active_cohorts = [
+        cohort for cohort in cohort_list if cohort["evaluable_success_count"] < min_cohort_success_seeds
+    ]
+    reusable_cohorts = [
+        cohort
+        for cohort in active_cohorts
+        if cohort["evaluable_success_count"] + cohort["pending_count"] < min_cohort_success_seeds
+    ]
+    reusable_cohorts.sort(
+        key=lambda cohort: (
+            cohort["planned_count"],
+            cohort["evaluable_success_count"] + cohort["pending_count"],
+            cohort["latest_seed"],
+        )
+    )
+
+    selected_cohort = reusable_cohorts[0] if reusable_cohorts else None
+    if len(active_cohorts) < max_simultaneous_cohorts:
         action = "plan_new_cohort"
-        reason = "The latest cohort has enough completed seeds for evaluation but did not meet the stop condition."
-    elif evaluable + pending >= min_cohort_success_seeds:
-        action = "wait_active_cohort"
-        reason = "The latest cohort already has enough planned/running seeds to reach the minimum cohort size."
-    else:
+        reason = "There is room to open another cohort while existing cohorts continue in parallel."
+    elif selected_cohort is not None:
         action = "reuse_active_cohort"
-        reason = "The latest cohort needs more repeated seeds with identical physical parameters."
+        reason = "All cohort slots are occupied, so reuse the open cohort that most needs additional repeated seeds."
+    else:
+        action = "wait_active_cohorts"
+        reason = "The maximum number of simultaneous cohorts is already open and each has enough running jobs to potentially reach the minimum cohort size."
 
     return {
         "target_kappa_w_mk": target_kappa_w_mk,
         "target_relative_uncertainty_pct": target_relative_uncertainty_pct,
         "min_cohort_success_seeds": min_cohort_success_seeds,
+        "max_simultaneous_cohorts": max_simultaneous_cohorts,
         "stop_condition_met": False,
         "action": action,
         "reason": reason,
-        "active_cohort": active_cohort,
+        "selected_cohort": selected_cohort,
+        "active_cohorts": active_cohorts,
         "cohorts": cohort_list,
     }

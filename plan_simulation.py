@@ -407,8 +407,8 @@ def main() -> int:
         note="Default in-bounds plan used because no codex-generated plan was available.",
     )
 
-    if loop_state.get("action") == "reuse_active_cohort" and loop_state.get("active_cohort"):
-        plan = build_reuse_plan(args.seed, loop_state["active_cohort"])
+    if loop_state.get("action") == "reuse_active_cohort" and loop_state.get("selected_cohort"):
+        plan = build_reuse_plan(args.seed, loop_state["selected_cohort"])
     elif not args.disable_codex:
         with tempfile.TemporaryDirectory(prefix="a3ht-plan-", dir=str(run_dir)) as tmp_dir:
             output_path = Path(tmp_dir) / "codex_plan.json"

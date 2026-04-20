@@ -34,7 +34,8 @@ def main():
         print(json.dumps(summary, indent=2, sort_keys=True))
         return 0
 
-    active = summary.get("active_cohort") or {}
+    selected = summary.get("selected_cohort") or {}
+    active_cohorts = summary.get("active_cohorts") or []
     lines = [
         'A3HT_LOOP_ACTION="{}"'.format(shell_escape(summary.get("action", ""))),
         'A3HT_LOOP_REASON="{}"'.format(shell_escape(summary.get("reason", ""))),
@@ -44,11 +45,12 @@ def main():
             shell_escape(summary.get("target_relative_uncertainty_pct", ""))
         ),
         'A3HT_LOOP_MIN_COHORT_SUCCESS_SEEDS="{}"'.format(shell_escape(summary.get("min_cohort_success_seeds", ""))),
-        'A3HT_ACTIVE_COHORT_ID="{}"'.format(shell_escape(active.get("cohort_id", ""))),
-        'A3HT_ACTIVE_COHORT_SUCCESS_COUNT="{}"'.format(shell_escape(active.get("success_count", ""))),
-        'A3HT_ACTIVE_COHORT_PENDING_COUNT="{}"'.format(shell_escape(active.get("pending_count", ""))),
-        'A3HT_ACTIVE_COHORT_EVALUABLE_SUCCESS_COUNT="{}"'.format(
-            shell_escape(active.get("evaluable_success_count", ""))
+        'A3HT_ACTIVE_COHORT_COUNT="{}"'.format(shell_escape(len(active_cohorts))),
+        'A3HT_SELECTED_COHORT_ID="{}"'.format(shell_escape(selected.get("cohort_id", ""))),
+        'A3HT_SELECTED_COHORT_SUCCESS_COUNT="{}"'.format(shell_escape(selected.get("success_count", ""))),
+        'A3HT_SELECTED_COHORT_PENDING_COUNT="{}"'.format(shell_escape(selected.get("pending_count", ""))),
+        'A3HT_SELECTED_COHORT_EVALUABLE_SUCCESS_COUNT="{}"'.format(
+            shell_escape(selected.get("evaluable_success_count", ""))
         ),
     ]
     print("\n".join(lines))
