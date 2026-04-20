@@ -58,6 +58,8 @@ Do not recommend production runs outside these bounds by default. If the target 
 
 If uncertainty estimation is needed, the agent may propose multiple runs with the same physical simulation parameters but different random number seeds to estimate variability and confidence in the result.
 
+In the current autonomous workflow, treat 10 evaluable seeds per same-parameter cohort as the working minimum for uncertainty estimation unless the user explicitly changes it.
+
 ## Domain Expectations
 
 Default to MD best practices relevant to materials simulations, including:

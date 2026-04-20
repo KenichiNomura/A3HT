@@ -80,6 +80,13 @@ The default run script expects the LAMMPS executable at:
 
 `lammps-30Mar2026/build-cray-shared/lmp`
 
+For the in-repo `build-cray-shared` executable to start cleanly, the runtime environment must also provide:
+
+- `liblammps.so.0` from `lammps-30Mar2026/build-cray-shared`
+- `libkim-api.so.2` from a KIM installation such as `/lus/grand/projects/QuantMatManufact/knomura/glassycarbons/lammps-build/kim_build-prefix/lib`
+
+`run.sh` now prepends both of those locations to `LD_LIBRARY_PATH` automatically when available.
+
 It also tries to locate the OpenKIM model under:
 
 `$HOME/.kim-api`
@@ -147,15 +154,16 @@ The current target goal encoded in the planner is:
 
 - thermal conductivity target: `6 W/m-K`
 - relative uncertainty target: `< 10%`
-- minimum evaluable seeds per cohort: `5`
+- minimum evaluable seeds per cohort: `10`
+- maximum simultaneous open cohorts: `3` by default
 
-The same physical parameter set is repeated with different random seeds within a cohort until at least 5 evaluable seeds are available for uncertainty estimation.
+The same physical parameter set is repeated with different random seeds within a cohort until at least 10 evaluable seeds are available for uncertainty estimation. The autonomous loop may keep up to 3 open cohorts in flight at the same time by default.
 
 The autonomous loop stops submitting new jobs when any cohort reaches:
 
 - mean thermal conductivity `>= 6 W/m-K`
 - relative uncertainty `< 10%`
-- at least `5` evaluable seeds in that cohort
+- at least `10` evaluable seeds in that cohort
 
 The relative uncertainty is computed from the standard error of the cohort mean thermal conductivity.
 
@@ -334,6 +342,12 @@ bash cron_queue.sh
 
 `cron_queue.sh` forwards `A3HT_CODEX_BIN` into `qsub`, so the submitted batch job can resolve the same Codex executable if `run.sh` needs to regenerate planning artifacts.
 
+To override the default number of simultaneous cohorts, set:
+
+```bash
+export A3HT_MAX_SIMULTANEOUS_COHORTS=3
+```
+
 By default it tries to keep up to `A3HT_TARGET_JOBS` jobs in the scheduler, subject to the autonomous loop stop/wait rules, and submits `run.sh` with successive seeds from:
 
 `.queue_state/next_seed`
@@ -341,8 +355,8 @@ By default it tries to keep up to `A3HT_TARGET_JOBS` jobs in the scheduler, subj
 Before each `qsub`, `cron_queue.sh` checks the current cohort status:
 
 - `stop`: no new jobs are submitted because a cohort already meets the target
-- `wait_active_cohort`: no new jobs are submitted because the active cohort already has enough planned/running seeds to reach the minimum cohort size
-- `reuse_active_cohort`: the next seed reuses the active cohort parameters
+- `wait_active_cohorts`: no new jobs are submitted because the maximum number of simultaneous cohorts is already open and each has enough running jobs to potentially reach the minimum cohort size
+- `reuse_active_cohort`: the next seed reuses the selected open cohort parameters
 - `plan_new_cohort`: a fresh plan is generated for a new cohort
 
 When a submission is needed, `cron_queue.sh` creates `my_runs/<seed>/simulation_plan.*` so the submitted job already has a validated parameter set and cohort assignment.
@@ -385,6 +399,16 @@ message=... was built without the LAMMPS KIM package enabled
 ```
 
 Those runs are safe to purge and requeue after you point `LAMMPS_BIN` or `LAMMPS_DIR` at a KIM-enabled build.
+
+Another common failure mode is a correct in-repo `lmp` executable with missing runtime libraries. In that case `run.sh` will fail during `environment_check` before the `-help` package probes can succeed. The intended default configuration is:
+
+```bash
+export LAMMPS_DIR=/lus/eagle/projects/uMLIP-PET-FT/knomura/a3ht/lammps-30Mar2026/build-cray-shared
+export LAMMPS_BIN=$LAMMPS_DIR/lmp
+export LD_LIBRARY_PATH=$LAMMPS_DIR:/lus/grand/projects/QuantMatManufact/knomura/glassycarbons/lammps-build/kim_build-prefix/lib:$LD_LIBRARY_PATH
+```
+
+If you keep the default `run.sh` paths, you should not need to set these manually unless your batch environment strips `LD_LIBRARY_PATH`.
 
 ## Post-Processing
 
