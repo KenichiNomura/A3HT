@@ -3,8 +3,8 @@
 #PBS -l filesystems=eagle
 #PBS -N a3ht
 #PBS -q workq
-#PBS -l select=4:ncpus=128
-#PBS -l walltime=06:00:00
+#PBS -l select=4:ncpus=256
+#PBS -l walltime=12:00:00
 #PBS -j oe
 
 set -euo pipefail
@@ -51,6 +51,7 @@ trap finish_run EXIT
 default_lammps_dir="${rootdir}/lammps-30Mar2026/build-cray-shared"
 LAMMPS_DIR="${LAMMPS_DIR:-${default_lammps_dir}}"
 LAMMPS_BIN="${LAMMPS_BIN:-${LAMMPS_DIR}/lmp}"
+default_kim_runtime_lib="/lus/grand/projects/QuantMatManufact/knomura/glassycarbons/lammps-build/kim_build-prefix/lib"
 PLANNER_SCRIPT="${A3HT_PLANNER_SCRIPT:-${rootdir}/plan_simulation.py}"
 echo "${LAMMPS_BIN}"
 
@@ -65,11 +66,31 @@ else
     exit 1
 fi
 
-if [[ -n "${PBS_NODEFILE:-}" && -r "${PBS_NODEFILE}" ]]; then
-    ntasks=$(wc -l < "${PBS_NODEFILE}")
-else
-    ntasks=32
-fi
+detect_ntasks() {
+    local unique_nodes=""
+    local default_ppn=128
+
+    if [[ -n "${PBS_NODEFILE:-}" && -r "${PBS_NODEFILE}" ]]; then
+        unique_nodes=$(sort -u "${PBS_NODEFILE}" | wc -l)
+
+        if [[ "${PBS_NUM_PPN:-}" =~ ^[1-9][0-9]*$ ]]; then
+            printf '%s\n' "$(( unique_nodes * PBS_NUM_PPN ))"
+            return
+        fi
+
+        printf '%s\n' "$(( unique_nodes * default_ppn ))"
+        return
+    fi
+
+    if [[ "${PBS_NP:-}" =~ ^[1-9][0-9]*$ ]]; then
+        printf '%s\n' "${PBS_NP}"
+        return
+    fi
+
+    printf '%s\n' 128
+}
+
+ntasks=$(detect_ntasks)
 lmp_bin="${LAMMPS_BIN}"
 
 seed=""
@@ -154,7 +175,10 @@ fi
 
 kim_runtime_lib=""
 ldd_kim_lib=$(ldd "${LAMMPS_BIN}" 2>/dev/null | awk '/libkim-api\.so/ && $3 ~ /^\// {print $3; exit}')
-for candidate in     "${LAMMPS_DIR}/kim_build-prefix/lib"     "${ldd_kim_lib:+$(dirname "${ldd_kim_lib}")}"     "/lus/grand/projects/QuantMatManufact/knomura/glassycarbons/lammps-build/kim_build-prefix/lib"
+for candidate in \
+    "${LAMMPS_DIR}/kim_build-prefix/lib" \
+    "${ldd_kim_lib:+$(dirname "${ldd_kim_lib}")}" \
+    "${default_kim_runtime_lib}"
 do
     if [[ -n "${candidate}" && -d "${candidate}" ]]; then
         kim_runtime_lib="${candidate}"
@@ -163,7 +187,7 @@ do
 done
 
 if [[ -z "${kim_runtime_lib}" ]]; then
-    fail "could not locate the OpenKIM runtime library directory for ${LAMMPS_BIN}"
+    fail "could not locate the OpenKIM runtime library directory for ${LAMMPS_BIN}; set LD_LIBRARY_PATH or place libkim-api.so under ${LAMMPS_DIR}/kim_build-prefix/lib"
 fi
 
 runtime_lib_dirs=(
@@ -178,6 +202,7 @@ runtime_lib_dirs=(
     "/usr/lib64"
 )
 export LD_LIBRARY_PATH="$(IFS=:; echo "${runtime_lib_dirs[*]}")${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+echo "Using KIM runtime library dir ${kim_runtime_lib}"
 
 if ! "${LAMMPS_BIN}" -help 2>/dev/null | awk '
     /^Installed packages:/ {in_pkgs=1; next}
@@ -233,6 +258,14 @@ fi
 
 # shellcheck disable=SC1090
 source "${plan_env}"
+
+if [ "${A3HT_PLANNER_STATUS:-ok}" != "ok" ]; then
+    printf "%s\n" "Planner degraded: source=${A3HT_PLAN_SOURCE:-unknown}" > planner_warning.txt
+    if [ -n "${A3HT_PLANNER_ERROR:-}" ]; then
+        printf "%s\n" "${A3HT_PLANNER_ERROR}" >> planner_warning.txt
+    fi
+    log "Planner degraded: source=${A3HT_PLAN_SOURCE:-unknown}"
+fi
 echo "Using simulation plan source: ${A3HT_PLAN_SOURCE}"
 echo "Cohort: id=${A3HT_COHORT_ID} target_evaluable_seeds=${A3HT_COHORT_SEED_TARGET}"
 echo "Plan goal: target_kappa=${A3HT_GOAL_TARGET_KAPPA_W_MK} W/m-K max_rel_uncertainty=${A3HT_GOAL_MAX_REL_UNCERT_PCT}%"

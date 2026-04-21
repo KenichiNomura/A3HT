@@ -182,8 +182,8 @@ while [ "${submitted}" -lt "${jobs_to_submit}" ]; do
         printf '%s stop_condition_met=1 action=%s reason=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${A3HT_LOOP_ACTION}" "${A3HT_LOOP_REASON}" >> "${LOG_FILE}"
         break
     fi
-    if [ "${A3HT_LOOP_ACTION}" = "wait_active_cohort" ]; then
-        printf '%s action=%s active_cohort=%s reason=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${A3HT_LOOP_ACTION}" "${A3HT_ACTIVE_COHORT_ID}" "${A3HT_LOOP_REASON}" >> "${LOG_FILE}"
+    if [ "${A3HT_LOOP_ACTION}" = "wait_active_cohorts" ]; then
+        printf '%s action=%s active_cohort_count=%s reason=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${A3HT_LOOP_ACTION}" "${A3HT_ACTIVE_COHORT_COUNT}" "${A3HT_LOOP_REASON}" >> "${LOG_FILE}"
         break
     fi
     seed_source="next_seed"
@@ -212,8 +212,7 @@ while [ "${submitted}" -lt "${jobs_to_submit}" ]; do
     else
         advance_next_seed "${seed}"
     fi
-    submitted=$((submitted + 1))
-    printf '%s planner=%s seed=%s source=%s action=%s active_cohort=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${planner_result}" "${seed}" "${seed_source}" "${A3HT_LOOP_ACTION}" "${A3HT_ACTIVE_COHORT_ID}" >> "${LOG_FILE}"
+    printf '%s planner=%s seed=%s source=%s action=%s selected_cohort=%s active_cohort_count=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${planner_result}" "${seed}" "${seed_source}" "${A3HT_LOOP_ACTION}" "${A3HT_SELECTED_COHORT_ID}" "${A3HT_ACTIVE_COHORT_COUNT}" >> "${LOG_FILE}"
     printf '%s submitted job_id=%s seed=%s source=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${job_id}" "${seed}" "${seed_source}" >> "${LOG_FILE}"
 done
 
