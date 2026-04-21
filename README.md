@@ -54,7 +54,7 @@ You will need:
 - OpenKIM installed and configured
 - The OpenKIM portable model:
   - `EDIP_LAMMPS_Marks_2000_C__MO_374144505645_000`
-- Python 3
+- Python 3.7 or newer
 - Python packages:
   - `numpy`
   - `xgboost` for model training
@@ -104,7 +104,7 @@ based on that installation.
 - `run.sh`: end-to-end driver for environment checks, optional simulation planning, structure generation, annealing, thermalization, and NEMD
 - `cron_queue.sh`: drives the autonomous loop by checking cohort stop/wait conditions, planning the next run before submission, and prioritizing retry seeds from `.queue_state/resubmit_seeds.txt`
 - `plan_simulation.py`: uses `codex exec` or active-cohort reuse to choose per-run simulation parameters, validates hard constraints, and writes run-local plan artifacts
-- `loop_status.py`: reports whether the autonomous loop should stop, wait for the active cohort, reuse it, or open a new cohort
+- `loop_status.py`: reports whether the autonomous loop should stop, wait for the active cohorts, reuse a selected cohort, or open a new cohort
 - `autonomy.py`: shared cohort statistics and stop-condition logic
 - `simulation_plan_schema.json`: JSON schema enforced on planner output
 - `prepare_resubmits.py`: finds failed/incomplete runs, purges their run directories, and writes the retry queue for cron
@@ -152,7 +152,7 @@ Current hard geometry constraints are:
 
 The current target goal encoded in the planner is:
 
-- thermal conductivity target: `6 W/m-K`
+- thermal conductivity target: `3 W/m-K`
 - relative uncertainty target: `< 10%`
 - minimum evaluable seeds per cohort: `10`
 - maximum simultaneous open cohorts: `3` by default

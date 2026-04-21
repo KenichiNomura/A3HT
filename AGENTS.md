@@ -60,6 +60,8 @@ If uncertainty estimation is needed, the agent may propose multiple runs with th
 
 In the current autonomous workflow, treat 10 evaluable seeds per same-parameter cohort as the working minimum for uncertainty estimation unless the user explicitly changes it.
 
+The current autonomous target thermal conductivity is 3 W/m-K unless the user explicitly changes it.
+
 ## Domain Expectations
 
 Default to MD best practices relevant to materials simulations, including:
