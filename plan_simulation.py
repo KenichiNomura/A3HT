@@ -37,23 +37,23 @@ def planner_metadata(source: str, error: str = "") -> dict:
 DEFAULT_PARAMETERS: Dict[str, Any] = {
     "density_g_cm3": 1.5,
     "flake_area_a2": 20.0,
-    "box_x_a": 20.0,
-    "box_y_a": 20.0,
-    "box_z_a": 40.0,
+    "box_x_a": 60.0,
+    "box_y_a": 60.0,
+    "box_z_a": 120.0,
     "anneal_timestep_ps": 0.0002,
     "anneal_10ps_steps": 50000,
     "anneal_50ps_steps": 250000,
     "thermalize_temperature_k": 300.0,
     "thermalize_timestep_ps": 0.0001,
-    "thermalize_nvt_steps": 250000,
-    "thermalize_npt_steps": 250000,
-    "thermalize_nve_steps": 250000,
+    "thermalize_nvt_steps": 300000,
+    "thermalize_npt_steps": 300000,
+    "thermalize_nve_steps": 300000,
     "nemd_timestep_ps": 0.0001,
     "nemd_slab_width_a": 5.0,
     "nemd_freeze_width_a": 5.0,
     "nemd_bin_size_a": 5.0,
-    "nemd_eflux_ev_ps": 0.2,
-    "nemd_steps": 1000000,
+    "nemd_eflux_ev_ps": 0.30,
+    "nemd_steps": 2000000,
 }
 
 
@@ -141,9 +141,9 @@ def planner_prompt(seed: int, history: Dict[str, Any]) -> str:
         "different random seeds to estimate uncertainty.\n\n"
         "Hard constraints:\n"
         "- flake_area_a2 must remain within 10-30\n"
-        "- box_x_a must remain within 20-50\n"
-        "- box_y_a must remain within 20-50\n"
-        "- box_z_a must remain within 40-100\n\n"
+        "- box_x_a must remain within 40-80\n"
+        "- box_y_a must remain within 40-80\n"
+        "- box_z_a must remain within 80-160\n\n"
         "Return one JSON object matching the provided schema.\n"
         "Keep recommended_parameters concrete and numerically explicit.\n"
         "If history is sparse or inconclusive, prefer conservative defaults and use repeated seeds "
@@ -278,11 +278,11 @@ def validate_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
 
     if not 10.0 <= validated["flake_area_a2"] <= 30.0:
         raise ValueError("flake_area_a2 violates hard constraints")
-    if not 20.0 <= validated["box_x_a"] <= 50.0:
+    if not 40.0 <= validated["box_x_a"] <= 80.0:
         raise ValueError("box_x_a violates hard constraints")
-    if not 20.0 <= validated["box_y_a"] <= 50.0:
+    if not 40.0 <= validated["box_y_a"] <= 80.0:
         raise ValueError("box_y_a violates hard constraints")
-    if not 40.0 <= validated["box_z_a"] <= 100.0:
+    if not 80.0 <= validated["box_z_a"] <= 160.0:
         raise ValueError("box_z_a violates hard constraints")
     if 2.0 * (validated["nemd_freeze_width_a"] + validated["nemd_slab_width_a"]) >= validated["box_z_a"]:
         raise ValueError("box_z_a is too short for the requested freeze and slab widths")

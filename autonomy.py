@@ -95,7 +95,7 @@ def collect_run_records(runs_root: Path) -> List[Dict[str, Any]]:
             "run_dir": str(run_dir),
             "status": normalized_status,
             "plan": plan,
-            "kappa_w_mk": read_last_kappa(run_dir / "data" / "gc_edip_hotcold.cont.dat"),
+            "kappa_w_mk": read_last_kappa(run_dir / "data" / "gc_rebo2_hotcold.dat"),
         }
         if plan is not None:
             params = plan.get("recommended_parameters", {})

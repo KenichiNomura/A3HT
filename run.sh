@@ -51,7 +51,6 @@ trap finish_run EXIT
 default_lammps_dir="${rootdir}/lammps-30Mar2026/build-cray-shared"
 LAMMPS_DIR="${LAMMPS_DIR:-${default_lammps_dir}}"
 LAMMPS_BIN="${LAMMPS_BIN:-${LAMMPS_DIR}/lmp}"
-default_kim_runtime_lib="/lus/grand/projects/QuantMatManufact/knomura/glassycarbons/lammps-build/kim_build-prefix/lib"
 PLANNER_SCRIPT="${A3HT_PLANNER_SCRIPT:-${rootdir}/plan_simulation.py}"
 echo "${LAMMPS_BIN}"
 
@@ -95,7 +94,6 @@ lmp_bin="${LAMMPS_BIN}"
 
 seed=""
 processors=auto
-kim_model_id=EDIP_LAMMPS_Marks_2000_C__MO_374144505645_000
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -173,26 +171,9 @@ if [[ ! -x "${LAMMPS_BIN}" ]]; then
     fail "LAMMPS executable not found: ${LAMMPS_BIN}"
 fi
 
-kim_runtime_lib=""
-ldd_kim_lib=$(ldd "${LAMMPS_BIN}" 2>/dev/null | awk '/libkim-api\.so/ && $3 ~ /^\// {print $3; exit}')
-for candidate in \
-    "${LAMMPS_DIR}/kim_build-prefix/lib" \
-    "${ldd_kim_lib:+$(dirname "${ldd_kim_lib}")}" \
-    "${default_kim_runtime_lib}"
-do
-    if [[ -n "${candidate}" && -d "${candidate}" ]]; then
-        kim_runtime_lib="${candidate}"
-        break
-    fi
-done
-
-if [[ -z "${kim_runtime_lib}" ]]; then
-    fail "could not locate the OpenKIM runtime library directory for ${LAMMPS_BIN}; set LD_LIBRARY_PATH or place libkim-api.so under ${LAMMPS_DIR}/kim_build-prefix/lib"
-fi
-
 runtime_lib_dirs=(
     "${LAMMPS_DIR}"
-    "${kim_runtime_lib}"
+    "/lus/grand/projects/QuantMatManufact/knomura/glassycarbons/lammps-build/kim_build-prefix/lib"
     "/opt/cray/pe/mpich/9.0.1/ofi/cray/20.0/lib"
     "/opt/cray/pe/lib64"
     "/opt/cray/libfabric/2.2.0rc1/lib64"
@@ -202,36 +183,10 @@ runtime_lib_dirs=(
     "/usr/lib64"
 )
 export LD_LIBRARY_PATH="$(IFS=:; echo "${runtime_lib_dirs[*]}")${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
-echo "Using KIM runtime library dir ${kim_runtime_lib}"
+echo "Using runtime library directories from test_rebo2-compatible configuration"
 
-if ! "${LAMMPS_BIN}" -help 2>/dev/null | awk '
-    /^Installed packages:/ {in_pkgs=1; next}
-    /^List of individual style options included in this LAMMPS executable/ {exit !found}
-    in_pkgs && /(^|[[:space:]])KIM([[:space:]]|$)/ {found=1}
-    END {exit !found}
-'; then
-    fail "${LAMMPS_BIN} was built without the LAMMPS KIM package enabled"
-fi
-
-if ! "${LAMMPS_BIN}" -help 2>/dev/null | awk '
-    /^\* Fix styles/ {in_fix=1; next}
-    /^\* / && in_fix {exit !found}
-    in_fix && /(^|[[:space:]])ehex([[:space:]]|$)/ {found=1}
-    END {exit !found}
-'; then
-    fail "${LAMMPS_BIN} does not provide fix ehex, which nemd.in requires"
-fi
-
-kim_model_path=$(find "${HOME}/.kim-api" -maxdepth 3 -type d -name "${kim_model_id}" -print -quit 2>/dev/null || true)
-if [[ -n "${kim_model_path}" ]]; then
-    kim_portable_dir=$(dirname "${kim_model_path}")
-    kim_root_dir=$(dirname "${kim_portable_dir}")
-    export KIM_API_MODEL_DRIVERS_DIR="${kim_root_dir}/model-drivers-dir${KIM_API_MODEL_DRIVERS_DIR:+:${KIM_API_MODEL_DRIVERS_DIR}}"
-    export KIM_API_PORTABLE_MODELS_DIR="${kim_portable_dir}${KIM_API_PORTABLE_MODELS_DIR:+:${KIM_API_PORTABLE_MODELS_DIR}}"
-    export KIM_API_SIMULATOR_MODELS_DIR="${kim_root_dir}/simulator-models-dir${KIM_API_SIMULATOR_MODELS_DIR:+:${KIM_API_SIMULATOR_MODELS_DIR}}"
-    echo "Using KIM model collection from ${kim_root_dir}"
-else
-    echo "warning: could not find ${kim_model_id} under ${HOME}/.kim-api" >&2
+if [[ ! -f "${rootdir}/CH.rebo" ]]; then
+    fail "REBO2 parameter file not found: ${rootdir}/CH.rebo"
 fi
 
 cd "${run_dir}"
@@ -264,7 +219,7 @@ if [ "${A3HT_PLANNER_STATUS:-ok}" != "ok" ]; then
     if [ -n "${A3HT_PLANNER_ERROR:-}" ]; then
         printf "%s\n" "${A3HT_PLANNER_ERROR}" >> planner_warning.txt
     fi
-    log "Planner degraded: source=${A3HT_PLAN_SOURCE:-unknown}"
+    echo "warning: Planner degraded: source=${A3HT_PLAN_SOURCE:-unknown}" >&2
 fi
 echo "Using simulation plan source: ${A3HT_PLAN_SOURCE}"
 echo "Cohort: id=${A3HT_COHORT_ID} target_evaluable_seeds=${A3HT_COHORT_SEED_TARGET}"
@@ -281,15 +236,17 @@ ${rootdir}/generate_random_carbon.py \
     --format lammps
 mv random_carbon.extxyz random_carbon.dat
 
+cp -v "${rootdir}/CH.rebo" CH.rebo
+
 stage="anneal"
 echo "${mpi_launcher[*]} ${ntasks} ${lmp_bin} -var procx ${procx} -var procy ${procy} -var procz ${procz} -log anneal.log -in ${rootdir}/anneal.in"
 "${mpi_launcher[@]}" "${ntasks}" "${lmp_bin}" -var procx "${procx}" -var procy "${procy}" -var procz "${procz}" -log anneal.log -in "${rootdir}/anneal.in"
-cp -v data/anneal_gc_edip_multistage.restart gc_edip.restart
+cp -v data/anneal_gc_rebo2.restart gc_rebo2.restart
 
 stage="thermalize"
 echo "${mpi_launcher[*]} ${ntasks} ${lmp_bin} -var procx ${procx} -var procy ${procy} -var procz ${procz} -log thermalize.log -in ${rootdir}/thermalize.in"
 "${mpi_launcher[@]}" "${ntasks}" "${lmp_bin}" -var procx "${procx}" -var procy "${procy}" -var procz "${procz}" -log thermalize.log -in "${rootdir}/thermalize.in"
-cp -v data/gc_edip_thermalize.restart gc_edip.restart 
+cp -v data/gc_rebo2_thermalize.restart gc_rebo2.restart
 
 stage="nemd"
 echo "${mpi_launcher[*]} ${ntasks} ${lmp_bin} -var procx ${procx} -var procy ${procy} -var procz ${procz} -log nemd.log -in ${rootdir}/nemd.in"

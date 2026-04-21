@@ -9,28 +9,21 @@ variable        procy index *
 variable        procz index *
 include         simulation_plan.lmp
 
-# Input structure and potential
-#variable        xyzfile string ../glassycarbon5.xyz # Diffusion carbon
 variable        outdir string data
 shell           mkdir ${outdir}
-variable        kim_model string EDIP_LAMMPS_Marks_2000_C__MO_374144505645_000
-
-# Use the Marks 2000 EDIP/C OpenKIM model for carbon.
-kim             init ${kim_model} metal
 
 processors      ${procx} ${procy} ${procz}
 
-# The XYZ file uses the element symbol "C" for atom labels.
-read_data        random_carbon.dat 
+read_data       random_carbon.dat
 
-#mass            1 12.011
+mass            1 12.011
+
+pair_style      rebo
+pair_coeff      * * CH.rebo C
 
 neighbor        2.0 bin
 neigh_modify    delay 0 every 1 check yes
 
-kim             interactions C
-
-# Coordination analysis using a tunable C-C first-neighbor cutoff.
 compute         coord all coord/atom cutoff ${anneal_coord_cutoff_a}
 variable        is2 atom (c_coord>=1.5 && c_coord<2.5)
 variable        is3 atom (c_coord>=2.5 && c_coord<3.5)
@@ -51,35 +44,30 @@ minimize        1.0e-10 1.0e-10 10000 100000
 velocity        all create ${anneal_tstart_k} ${anneal_velocity_seed} mom yes rot no dist gaussian
 fix             mom all momentum 100 linear 1 1 1
 
-dump            traj all custom 5000 ${outdir}/anneal_gc_edip_multistage.lammpstrj id type x y z vx vy vz
-fix             coordlog all ave/time 100 10 1000 c_n2 c_n3 c_n4 file ${outdir}/anneal_gc_edip_multistage_coordination.dat mode scalar
+dump            traj all custom 5000 ${outdir}/anneal_gc_rebo2.lammpstrj id type x y z vx vy vz
+fix             coordlog all ave/time 100 10 1000 c_n2 c_n3 c_n4 file ${outdir}/anneal_gc_rebo2_coordination.dat mode scalar
 
-# Anneal for 10 ps at 1500 K.
 fix             anneal1 all nvt temp ${anneal_t1_k} ${anneal_t1_k} ${anneal_tdamp_ps}
 run             ${anneal_10ps_steps}
 unfix           anneal1
 
-# Anneal for 10 ps at 2000 K.
 fix             anneal2 all nvt temp ${anneal_t2_k} ${anneal_t2_k} ${anneal_tdamp_ps}
 run             ${anneal_10ps_steps}
 unfix           anneal2
 
-# Anneal for 10 ps at 3000 K.
 fix             anneal3 all nvt temp ${anneal_t3_k} ${anneal_t3_k} ${anneal_tdamp_ps}
 run             ${anneal_10ps_steps}
 unfix           anneal3
 
-# Anneal for 10 ps at 4000 K.
 fix             anneal4 all nvt temp ${anneal_t4_k} ${anneal_t4_k} ${anneal_tdamp_ps}
 run             ${anneal_10ps_steps}
 unfix           anneal4
 
-# Anneal for 50 ps at 4500 K.
 fix             anneal5 all nvt temp ${anneal_t5_k} ${anneal_t5_k} ${anneal_tdamp_ps}
 run             ${anneal_50ps_steps}
 unfix           anneal5
 
 undump          traj
 unfix           coordlog
-write_restart   ${outdir}/anneal_gc_edip_multistage.restart
-write_data      ${outdir}/anneal_gc_edip_multistage.data
+write_restart   ${outdir}/anneal_gc_rebo2.restart
+write_data      ${outdir}/anneal_gc_rebo2.data
