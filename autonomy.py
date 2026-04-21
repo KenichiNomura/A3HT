@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional
 ROOT = Path(__file__).resolve().parent
 RUNS_ROOT = ROOT / "my_runs"
 
-TARGET_KAPPA_W_MK = 6.0
+TARGET_KAPPA_W_MK = 3.0
 TARGET_RELATIVE_UNCERTAINTY_PCT = 10.0
 MIN_COHORT_SUCCESS_SEEDS = 10
 MAX_SIMULTANEOUS_COHORTS = int(os.environ.get("A3HT_MAX_SIMULTANEOUS_COHORTS", "3"))

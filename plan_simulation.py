@@ -26,6 +26,14 @@ RUNS_ROOT = ROOT / "my_runs"
 SCHEMA_PATH = ROOT / "simulation_plan_schema.json"
 DEFAULT_CODEX_BIN = "/home/knomura/.nvm/versions/node/v24.14.1/bin/codex"
 
+
+def planner_metadata(source: str, error: str = "") -> dict:
+    status = "ok" if source == "codex" else "degraded"
+    metadata = {"planner_source": source, "planner_status": status}
+    if error:
+        metadata["planner_error"] = error.strip()
+    return metadata
+
 DEFAULT_PARAMETERS: Dict[str, Any] = {
     "density_g_cm3": 1.5,
     "flake_area_a2": 20.0,
