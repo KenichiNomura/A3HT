@@ -57,7 +57,8 @@ Recommended practical setup:
 - a LAMMPS build that supports `fix ehex` and can load the linked runtime libraries
 - the REBO2 parameter file `CH.rebo` available in the repo root
 - multiple independent seeds in `my_runs/` if you want meaningful ML training data
-- a working `codex exec` installation if you want AI-generated plans rather than fallback defaults
+- a Globus token for the ALCF inference endpoint (primary planner); authenticate once with `python3 inference_auth_token.py authenticate`
+- optionally a `codex exec` installation as a secondary planner if ALCF is unavailable
 - a PBS environment if you want to use the included queue-filler unchanged
 
 If `codex` is installed outside the default non-interactive `PATH`, set:
@@ -66,7 +67,13 @@ If `codex` is installed outside the default non-interactive `PATH`, set:
 export A3HT_CODEX_BIN=/home/knomura/.nvm/versions/node/v24.14.1/bin/codex
 ```
 
-This is especially important for cron and PBS jobs, which often do not inherit your interactive shell startup files.
+To override the ALCF model (default: `meta-llama/Meta-Llama-3.1-70B-Instruct`):
+
+```bash
+export A3HT_ALCF_MODEL=meta-llama/Meta-Llama-3.1-405B-Instruct
+```
+
+These are especially important for cron and PBS jobs, which often do not inherit your interactive shell startup files.
 
 The default in-repo LAMMPS executable used by `run.sh` is:
 
@@ -79,7 +86,7 @@ The default in-repo LAMMPS executable used by `run.sh` is:
 
 - `run.sh`: end-to-end driver for environment checks, optional simulation planning, structure generation, annealing, thermalization, and NEMD
 - `cron_queue.sh`: drives the autonomous loop by checking cohort stop/wait conditions, planning the next run before submission, and prioritizing retry seeds from `.queue_state/resubmit_seeds.txt`
-- `plan_simulation.py`: uses `codex exec` or active-cohort reuse to choose per-run simulation parameters, validates hard constraints, and writes run-local plan artifacts
+- `plan_simulation.py`: uses the ALCF inference endpoint (primary) or `codex exec` (secondary) to choose per-run simulation parameters, or reuses active-cohort parameters; validates hard constraints and writes run-local plan artifacts
 - `loop_status.py`: reports whether the autonomous loop should stop, wait for the active cohorts, reuse a selected cohort, or open a new cohort
 - `autonomy.py`: shared cohort statistics and stop-condition logic
 - `simulation_plan_schema.json`: JSON schema enforced on planner output
@@ -108,10 +115,10 @@ python3 plan_simulation.py --seed 123 --run-dir my_runs/123
 The planner:
 
 - summarizes recent successful runs from `my_runs/`
-- asks `codex exec` for a structured next-run plan
+- tries the ALCF inference endpoint first, then falls back to `codex exec`
 - reuses the active cohort parameters when repeated same-parameter seeds are still needed
 - validates the result against the current hard bounds
-- falls back to a conservative default plan if Codex is unavailable or the output is invalid
+- fails with a non-zero exit code if all planners are unavailable (no silent fallback)
 
 Each run gets:
 
@@ -226,13 +233,13 @@ fix coldflux all ehex 1000 -${nemd_eflux_ev_ps} region cold
 
 The transport setup uses frozen boundary slabs plus hot/cold exchange regions, so the calculation is a direct non-equilibrium estimate rather than an equilibrium fluctuation method.
 
-Important NEMD settings are now provided by the per-run plan. The default fallback plan uses:
+Important NEMD settings are provided by the per-run plan:
 
-- `dt = 0.0001 ps`
-- `slabw = 5.0 A`
-- `freezew = 5.0 A`
-- `eflux` is now planner-controlled and should remain within `1-3 eV/ps`
-- `nemd_steps = 1000000`
+- `dt` — timestep (ps)
+- `slabw` — hot/cold slab width (Å)
+- `freezew` — frozen boundary slab width (Å)
+- `eflux` — planner-controlled, constrained to `1-3 eV/ps`
+- `nemd_steps` — total MD steps
 
 The conductivity reported in `nemd.in` is:
 
@@ -310,14 +317,20 @@ The repository includes a lightweight PBS queue-filler:
 bash cron_queue.sh
 ```
 
-If the planner reports that `codex` is missing in cron or PBS, export the Codex binary path before launching the queue filler:
+The planner requires a valid Globus token for the ALCF inference endpoint. Authenticate once interactively before relying on the cron workflow:
+
+```bash
+python3 inference_auth_token.py authenticate
+```
+
+Tokens are cached in `~/.globus/` and refreshed automatically for up to 30 days. If the ALCF endpoint is unavailable, `codex exec` is tried as a secondary planner. Export its path if it is not on the non-interactive `PATH`:
 
 ```bash
 export A3HT_CODEX_BIN=/home/knomura/.nvm/versions/node/v24.14.1/bin/codex
 bash cron_queue.sh
 ```
 
-`cron_queue.sh` forwards `A3HT_CODEX_BIN` into `qsub`, so the submitted batch job can resolve the same Codex executable if `run.sh` needs to regenerate planning artifacts.
+`cron_queue.sh` forwards both `A3HT_CODEX_BIN` and `A3HT_ALCF_MODEL` into `qsub`.
 
 `cron_queue.sh` also forwards `A3HT_ROOT_DIR` into `qsub`, so batch jobs resolve paths relative to the repository root even when cron starts from `$HOME`.
 
@@ -482,7 +495,7 @@ Outputs include:
 ## Notes and Assumptions
 
 - `run.sh` is written for PBS and launches LAMMPS through `mpiexec` or `mpirun`.
-- If `codex exec` is unavailable or fails, `plan_simulation.py` falls back to a conservative default in-bounds plan so the workflow can continue.
+- If both ALCF and `codex exec` are unavailable, `plan_simulation.py` exits with a non-zero code and the job is not submitted.
 - Cohorts are defined by identical physical simulation parameters; random seeds differ within a cohort.
 - The repository contains local LAMMPS build directories, but the documented requirement is a LAMMPS executable that supports `fix ehex` and can load its linked runtime libraries.
 - The NEMD method implemented here is a direct heat-flux approach using `eHEX`, not Green-Kubo.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate per-run simulation plans, optionally using codex exec."""
+"""Generate per-run simulation plans using ALCF inference endpoint, with codex fallback."""
 
 import argparse
 import json
@@ -25,36 +25,11 @@ ROOT = Path(__file__).resolve().parent
 RUNS_ROOT = ROOT / "my_runs"
 SCHEMA_PATH = ROOT / "simulation_plan_schema.json"
 DEFAULT_CODEX_BIN = "/home/knomura/.nvm/versions/node/v24.14.1/bin/codex"
+AUTH_SCRIPT = ROOT / "inference_auth_token.py"
+ALCF_ENDPOINT = "https://inference-api.alcf.anl.gov/resource_server/sophia/vllm/v1"
+ALCF_DEFAULT_MODEL = "meta-llama/Meta-Llama-3.1-70B-Instruct"
+ALCF_PYTHON = "/home/knomura/lammps/.venv/bin/python3"
 
-
-def planner_metadata(source: str, error: str = "") -> dict:
-    status = "ok" if source == "codex" else "degraded"
-    metadata = {"planner_source": source, "planner_status": status}
-    if error:
-        metadata["planner_error"] = error.strip()
-    return metadata
-
-DEFAULT_PARAMETERS: Dict[str, Any] = {
-    "density_g_cm3": 1.5,
-    "flake_area_a2": 20.0,
-    "box_x_a": 50.0,
-    "box_y_a": 50.0,
-    "box_z_a": 100.0,
-    "anneal_timestep_ps": 0.0002,
-    "anneal_10ps_steps": 50000,
-    "anneal_50ps_steps": 250000,
-    "thermalize_temperature_k": 300.0,
-    "thermalize_timestep_ps": 0.0001,
-    "thermalize_nvt_steps": 300000,
-    "thermalize_npt_steps": 300000,
-    "thermalize_nve_steps": 300000,
-    "nemd_timestep_ps": 0.0001,
-    "nemd_slab_width_a": 5.0,
-    "nemd_freeze_width_a": 5.0,
-    "nemd_bin_size_a": 5.0,
-    "nemd_eflux_ev_ps": 1.50,
-    "nemd_steps": 2000000,
-}
 
 
 def parse_args() -> argparse.Namespace:
@@ -81,30 +56,32 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--disable-codex",
         action="store_true",
-        help="skip codex exec and emit the validated default plan",
+        help="skip both ALCF and codex planners; fails unless a cohort reuse is available",
     )
     parser.add_argument(
         "--codex-bin",
         default=None,
-        help="explicit path or command name for codex; default: A3HT_CODEX_BIN, then PATH, then built-in fallback",
+        help="explicit path or command name for codex (fallback planner)",
+    )
+    parser.add_argument(
+        "--alcf-model",
+        default=None,
+        help=f"ALCF model name; default: A3HT_ALCF_MODEL env var, then {ALCF_DEFAULT_MODEL}",
+    )
+    parser.add_argument(
+        "--alcf-endpoint",
+        default=None,
+        help=f"ALCF vLLM endpoint URL; default: {ALCF_ENDPOINT}",
+    )
+    parser.add_argument(
+        "--alcf-auth-script",
+        default=None,
+        help=f"path to inference_auth_token.py; default: {AUTH_SCRIPT}",
     )
     return parser.parse_args()
 
 
-def default_plan(source: str, note: str) -> Dict[str, Any]:
-    return {
-        "reasoning_summary": note,
-        "uncertainty_strategy": (
-            "Use identical physical parameters across multiple independent seeds to estimate "
-            "the mean thermal conductivity and relative uncertainty."
-        ),
-        "recommended_parameters": dict(DEFAULT_PARAMETERS),
-        "_meta": {
-            "planner_source": source,
-            "goal_target_kappa_w_mk": TARGET_KAPPA_W_MK,
-            "goal_max_relative_uncertainty_pct": TARGET_RELATIVE_UNCERTAINTY_PCT,
-        },
-    }
+
 def collect_history(runs_root: Path, max_history: int) -> Dict[str, Any]:
     all_records = collect_run_records(runs_root)
     recent_successes = []
@@ -140,10 +117,11 @@ def planner_prompt(seed: int, history: Dict[str, Any]) -> str:
         f"This plan is for run seed {seed}. The same physical parameter set may be reused across "
         "different random seeds to estimate uncertainty.\n\n"
         "Hard constraints:\n"
-        "- flake_area_a2 must remain within 10-30\n"
-        "- box_x_a must remain within 40-80\n"
-        "- box_y_a must remain within 40-80\n"
-        "- box_z_a must remain within 40-100\n\n"
+        "- flake_area_a2 must remain within 25-100 A^2\n"
+        "- box_x_a must remain within 20-50 A\n"
+        "- box_y_a must remain within 20-50 A\n"
+        "- box_z_a must remain within 40-100 A\n"
+        "- nemd_eflux_ev_ps must remain within 1-3 eV/ps\n\n"
         "Return one JSON object matching the provided schema.\n"
         "Keep recommended_parameters concrete and numerically explicit.\n"
         "If history is sparse or inconclusive, prefer conservative defaults and use repeated seeds "
@@ -179,6 +157,63 @@ def resolve_codex_bin(explicit_codex_bin: str) -> str:
     raise RuntimeError(
         "could not locate codex; set A3HT_CODEX_BIN or pass --codex-bin with the full path to the codex executable"
     )
+
+
+def get_alcf_token(auth_script: Path) -> str:
+    python = ALCF_PYTHON if Path(ALCF_PYTHON).is_file() else sys.executable
+    result = subprocess.run(
+        [python, str(auth_script), "get_access_token"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        universal_newlines=True, check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"inference_auth_token.py failed: {result.stderr.strip()}")
+    token = result.stdout.strip()
+    if not token:
+        raise RuntimeError("inference_auth_token.py returned an empty token")
+    return token
+
+
+def run_alcf_llm(
+    seed: int,
+    history: Dict[str, Any],
+    model: str,
+    endpoint: str,
+    auth_script: Path,
+) -> Dict[str, Any]:
+    try:
+        from openai import OpenAI
+    except ImportError as exc:
+        raise RuntimeError("openai package not installed; run: pip install openai") from exc
+
+    token = get_alcf_token(auth_script)
+    client = OpenAI(api_key=token, base_url=endpoint)
+
+    schema_text = SCHEMA_PATH.read_text(encoding="utf-8")
+    system_msg = (
+        "You are a materials simulation planner. "
+        "Respond with a single valid JSON object that matches the schema below exactly. "
+        "Do not include any text outside the JSON object.\n\n"
+        f"Schema:\n{schema_text}"
+    )
+    user_msg = planner_prompt(seed, history)
+
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": user_msg},
+        ],
+        response_format={"type": "json_object"},
+        temperature=0.3,
+        max_tokens=1024,
+    )
+
+    raw = response.choices[0].message.content
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"ALCF LLM returned invalid JSON: {exc}\nRaw response: {raw[:300]}") from exc
 
 
 def run_codex(seed: int, history: Dict[str, Any], output_path: Path, explicit_codex_bin: str) -> Dict[str, Any]:
@@ -286,12 +321,6 @@ def validate_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
         raise ValueError("box_z_a violates hard constraints")
     if not 1.0 <= validated["nemd_eflux_ev_ps"] <= 3.0:
         raise ValueError("nemd_eflux_ev_ps violates hard constraints")
-    if not 40.0 <= validated["box_x_a"] <= 80.0:
-        raise ValueError("box_x_a violates hard constraints")
-    if not 40.0 <= validated["box_y_a"] <= 80.0:
-        raise ValueError("box_y_a violates hard constraints")
-    if not 80.0 <= validated["box_z_a"] <= 160.0:
-        raise ValueError("box_z_a violates hard constraints")
     if 2.0 * (validated["nemd_freeze_width_a"] + validated["nemd_slab_width_a"]) >= validated["box_z_a"]:
         raise ValueError("box_z_a is too short for the requested freeze and slab widths")
 
@@ -329,8 +358,15 @@ def build_reuse_plan(seed: int, active_cohort: Dict[str, Any]) -> Dict[str, Any]
 
 def plan_to_env(seed: int, plan: Dict[str, Any]) -> Dict[str, str]:
     params = plan["recommended_parameters"]
-    return {
-        "A3HT_PLAN_SOURCE": plan["_meta"]["planner_source"],
+    source = plan["_meta"]["planner_source"]
+    status = "ok" if source in ("alcf_llm", "codex_exec", "cohort_reuse") else "degraded"
+    env: Dict[str, str] = {
+        "A3HT_PLAN_SOURCE": source,
+        "A3HT_PLANNER_STATUS": status,
+    }
+    if plan["_meta"].get("planner_error"):
+        env["A3HT_PLANNER_ERROR"] = str(plan["_meta"]["planner_error"])
+    env.update({
         "A3HT_COHORT_ID": plan["_meta"]["cohort_id"],
         "A3HT_COHORT_SEED_TARGET": str(plan["_meta"]["cohort_seed_target"]),
         "A3HT_GOAL_TARGET_KAPPA_W_MK": f"{plan['_meta']['goal_target_kappa_w_mk']:.6f}",
@@ -359,7 +395,8 @@ def plan_to_env(seed: int, plan: Dict[str, Any]) -> Dict[str, str]:
         "A3HT_NEMD_STEPS": str(params["nemd_steps"]),
         "A3HT_ANNEAL_VELOCITY_SEED": str(seed * 1000 + 101),
         "A3HT_THERMALIZE_VELOCITY_SEED": str(seed * 1000 + 202),
-    }
+    })
+    return env
 
 
 def shell_escape(value: str) -> str:
@@ -418,37 +455,62 @@ def main() -> int:
 
     history = collect_history(args.runs_root.resolve(), args.max_history)
     loop_state = history["loop_state"]
-    plan = default_plan(
-        source="fallback_default",
-        note="Default in-bounds plan used because no codex-generated plan was available.",
-    )
 
     if loop_state.get("action") == "reuse_active_cohort" and loop_state.get("selected_cohort"):
         plan = build_reuse_plan(args.seed, loop_state["selected_cohort"])
-    elif not args.disable_codex:
-        with tempfile.TemporaryDirectory(prefix="a3ht-plan-", dir=str(run_dir)) as tmp_dir:
-            output_path = Path(tmp_dir) / "codex_plan.json"
+    elif args.disable_codex:
+        print("error: planning disabled via --disable-codex and no reuse cohort available", file=sys.stderr)
+        return 1
+    else:
+        alcf_model    = args.alcf_model or os.environ.get("A3HT_ALCF_MODEL") or ALCF_DEFAULT_MODEL
+        alcf_endpoint = args.alcf_endpoint or ALCF_ENDPOINT
+        alcf_auth     = Path(args.alcf_auth_script) if args.alcf_auth_script else AUTH_SCRIPT
+
+        candidate = None
+        planner_source = None
+
+        # --- primary: ALCF inference endpoint ---
+        try:
+            candidate = run_alcf_llm(args.seed, history, alcf_model, alcf_endpoint, alcf_auth)
+            planner_source = "alcf_llm"
+        except Exception as alcf_exc:
+            alcf_error = str(alcf_exc)
+
+            # --- secondary: codex exec ---
             try:
-                candidate = run_codex(args.seed, history, output_path, args.codex_bin)
-                validated = validate_plan(candidate)
-                cohort_id = cohort_id_from_parameters(validated["recommended_parameters"])
-                plan = {
-                    **validated,
-                    "_meta": {
-                        "planner_source": "codex_exec",
-                        "goal_target_kappa_w_mk": TARGET_KAPPA_W_MK,
-                        "goal_max_relative_uncertainty_pct": TARGET_RELATIVE_UNCERTAINTY_PCT,
-                        "cohort_id": cohort_id,
-                        "cohort_seed_target": MIN_COHORT_SUCCESS_SEEDS,
-                    },
-                }
-            except Exception as exc:
-                plan = default_plan(
-                    source="fallback_default",
-                    note=sanitize_note(
-                        "Default in-bounds plan used because codex planning failed: {}".format(exc)
-                    ),
+                with tempfile.TemporaryDirectory(prefix="a3ht-plan-", dir=str(run_dir)) as tmp_dir:
+                    output_path = Path(tmp_dir) / "codex_plan.json"
+                    candidate = run_codex(args.seed, history, output_path, args.codex_bin)
+                planner_source = "codex_exec"
+            except Exception as codex_exc:
+                print(
+                    f"error: all planners failed\n"
+                    f"  ALCF: {alcf_error}\n"
+                    f"  codex: {codex_exc}",
+                    file=sys.stderr,
                 )
+                return 1
+
+        try:
+            validated = validate_plan(candidate)
+        except Exception as val_exc:
+            print(
+                f"error: plan from {planner_source} failed validation: {val_exc}",
+                file=sys.stderr,
+            )
+            return 1
+
+        cohort_id = cohort_id_from_parameters(validated["recommended_parameters"])
+        plan = {
+            **validated,
+            "_meta": {
+                "planner_source": planner_source,
+                "goal_target_kappa_w_mk": TARGET_KAPPA_W_MK,
+                "goal_max_relative_uncertainty_pct": TARGET_RELATIVE_UNCERTAINTY_PCT,
+                "cohort_id": cohort_id,
+                "cohort_seed_target": MIN_COHORT_SUCCESS_SEEDS,
+            },
+        }
 
     plan["_meta"].setdefault("cohort_id", cohort_id_from_parameters(plan["recommended_parameters"]))
     plan["_meta"].setdefault("cohort_seed_target", MIN_COHORT_SUCCESS_SEEDS)

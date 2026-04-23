@@ -11,6 +11,9 @@ DEFAULT_CODEX_BIN="/home/knomura/.nvm/versions/node/v24.14.1/bin/codex"
 DEFAULT_NODE_BIN_DIR="/home/knomura/.nvm/versions/node/v24.14.1/bin"
 export A3HT_CODEX_BIN="${A3HT_CODEX_BIN:-${DEFAULT_CODEX_BIN}}"
 CODEX_BIN_VALUE="${A3HT_CODEX_BIN}"
+DEFAULT_ALCF_MODEL="meta-llama/Meta-Llama-3.1-70B-Instruct"
+export A3HT_ALCF_MODEL="${A3HT_ALCF_MODEL:-${DEFAULT_ALCF_MODEL}}"
+ALCF_MODEL_VALUE="${A3HT_ALCF_MODEL}"
 STATE_DIR="${A3HT_STATE_DIR:-${ROOT_DIR}/.queue_state}"
 LOCK_DIR="${STATE_DIR}/lock"
 COUNTER_FILE="${STATE_DIR}/next_seed"
@@ -205,6 +208,9 @@ while [ "${submitted}" -lt "${jobs_to_submit}" ]; do
     qsub_vars="A3HT_SEED=${seed},A3HT_ROOT_DIR=${ROOT_DIR}"
     if [ -n "${CODEX_BIN_VALUE}" ]; then
         qsub_vars="${qsub_vars},A3HT_CODEX_BIN=${CODEX_BIN_VALUE}"
+    fi
+    if [ -n "${ALCF_MODEL_VALUE}" ]; then
+        qsub_vars="${qsub_vars},A3HT_ALCF_MODEL=${ALCF_MODEL_VALUE}"
     fi
     if ! job_id="$("${QSUB_CMD}" -N "${JOB_NAME}" -v "${qsub_vars}" "${JOB_SCRIPT}")"; then
         printf '%s qsub failed for seed=%s source=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${seed}" "${seed_source}" >> "${LOG_FILE}"
