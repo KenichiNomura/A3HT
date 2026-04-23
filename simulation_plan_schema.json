@@ -45,8 +45,8 @@
         },
         "flake_area_a2": {
           "type": "number",
-          "minimum": 10.0,
-          "maximum": 30.0
+          "minimum": 25.0,
+          "maximum": 100.0
         },
         "box_x_a": {
           "type": "number",
@@ -113,7 +113,8 @@
         },
         "nemd_eflux_ev_ps": {
           "type": "number",
-          "exclusiveMinimum": 0.0
+          "minimum": 1.0,
+          "maximum": 3.0
         },
         "nemd_steps": {
           "type": "integer",

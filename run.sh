@@ -9,7 +9,13 @@
 
 set -euo pipefail
 
-rootdir=/lus/eagle/projects/uMLIP-PET-FT/knomura/a3ht
+if [[ -n "${A3HT_ROOT_DIR:-}" ]]; then
+    rootdir="${A3HT_ROOT_DIR}"
+elif [[ -n "${PBS_O_WORKDIR:-}" ]]; then
+    rootdir="${PBS_O_WORKDIR}"
+else
+    rootdir="$(cd "$(dirname "$0")" && pwd)"
+fi
 cd "${rootdir}"
 
 stage="startup"
@@ -48,7 +54,7 @@ finish_run() {
 
 trap finish_run EXIT
 
-default_lammps_dir="${rootdir}/lammps-30Mar2026/build-cray-shared"
+default_lammps_dir="${rootdir}/lammps-30Mar2026/build-cray-rebo2"
 LAMMPS_DIR="${LAMMPS_DIR:-${default_lammps_dir}}"
 LAMMPS_BIN="${LAMMPS_BIN:-${LAMMPS_DIR}/lmp}"
 PLANNER_SCRIPT="${A3HT_PLANNER_SCRIPT:-${rootdir}/plan_simulation.py}"
