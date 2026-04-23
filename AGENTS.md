@@ -45,10 +45,11 @@ When proposing a plan, provide:
 
 For now, treat these as hard constraints on proposed simulation plans unless the user explicitly overrides them:
 
-- Flake area: 10-30 A^2
+- Flake area: 25-100 A^2
 - Total simulation box in x: 20-50 A
 - Total simulation box in y: 20-50 A
 - Total simulation box in z: 40-100 A
+- NEMD heat deposition/removal magnitude (`nemd_eflux_ev_ps`): 1-3 eV/ps
 
 Do not recommend production runs outside these bounds by default. If the target goal appears unreachable within these limits, state that explicitly and propose:
 

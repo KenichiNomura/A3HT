@@ -9,7 +9,7 @@ Features come from:
 - analysis/nemd/summary.json
 - analysis/anneal_timeseries/trajectory_summary.csv
 - histogram-style CSV outputs in analysis/anneal and analysis/nemd
-- final NEMD thermal-conductivity outputs in data/gc_edip_hotcold.cont.dat
+- final NEMD thermal-conductivity outputs in data/gc_rebo2_hotcold.dat
 
 Optionally, the script can generate missing analysis artifacts by invoking the
 existing analysis scripts in this directory.
@@ -162,10 +162,10 @@ def generate_analysis(run_dir: Path, overwrite: bool) -> None:
     data_dir = run_dir / "data"
     analysis_dir.mkdir(parents=True, exist_ok=True)
 
-    anneal_snapshot = data_dir / "anneal_gc_edip_multistage.data"
-    anneal_traj = data_dir / "anneal_gc_edip_multistage.lammpstrj"
-    coordlog = data_dir / "anneal_gc_edip_multistage_coordination.dat"
-    nemd_traj = data_dir / "gc_edip_nemd.cont.lammpstrj"
+    anneal_snapshot = data_dir / "anneal_gc_rebo2.data"
+    anneal_traj = data_dir / "anneal_gc_rebo2.lammpstrj"
+    coordlog = data_dir / "anneal_gc_rebo2_coordination.dat"
+    nemd_traj = data_dir / "gc_rebo2_nemd.lammpstrj"
 
     jobs: List[Tuple[List[str], Path]] = []
     if anneal_snapshot.exists():
@@ -396,7 +396,7 @@ def collect_run_features(run_dir: Path, min_frames: int) -> Dict[str, float]:
     anneal_summary_path = analysis_dir / "anneal" / "summary.json"
     nemd_summary_path = analysis_dir / "nemd" / "summary.json"
     trajectory_path = analysis_dir / "anneal_timeseries" / "trajectory_summary.csv"
-    hotcold_path = data_dir / "gc_edip_hotcold.cont.dat"
+    hotcold_path = data_dir / "gc_rebo2_hotcold.dat"
 
     if not anneal_summary_path.exists():
         raise FileNotFoundError(f"missing {anneal_summary_path}")

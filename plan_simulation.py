@@ -37,9 +37,9 @@ def planner_metadata(source: str, error: str = "") -> dict:
 DEFAULT_PARAMETERS: Dict[str, Any] = {
     "density_g_cm3": 1.5,
     "flake_area_a2": 20.0,
-    "box_x_a": 60.0,
-    "box_y_a": 60.0,
-    "box_z_a": 120.0,
+    "box_x_a": 50.0,
+    "box_y_a": 50.0,
+    "box_z_a": 100.0,
     "anneal_timestep_ps": 0.0002,
     "anneal_10ps_steps": 50000,
     "anneal_50ps_steps": 250000,
@@ -52,7 +52,7 @@ DEFAULT_PARAMETERS: Dict[str, Any] = {
     "nemd_slab_width_a": 5.0,
     "nemd_freeze_width_a": 5.0,
     "nemd_bin_size_a": 5.0,
-    "nemd_eflux_ev_ps": 0.30,
+    "nemd_eflux_ev_ps": 1.50,
     "nemd_steps": 2000000,
 }
 
@@ -143,7 +143,7 @@ def planner_prompt(seed: int, history: Dict[str, Any]) -> str:
         "- flake_area_a2 must remain within 10-30\n"
         "- box_x_a must remain within 40-80\n"
         "- box_y_a must remain within 40-80\n"
-        "- box_z_a must remain within 80-160\n\n"
+        "- box_z_a must remain within 40-100\n\n"
         "Return one JSON object matching the provided schema.\n"
         "Keep recommended_parameters concrete and numerically explicit.\n"
         "If history is sparse or inconclusive, prefer conservative defaults and use repeated seeds "
@@ -276,8 +276,16 @@ def validate_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
         "nemd_steps": validate_positive_int("nemd_steps", params.get("nemd_steps")),
     }
 
-    if not 10.0 <= validated["flake_area_a2"] <= 30.0:
+    if not 25.0 <= validated["flake_area_a2"] <= 100.0:
         raise ValueError("flake_area_a2 violates hard constraints")
+    if not 20.0 <= validated["box_x_a"] <= 50.0:
+        raise ValueError("box_x_a violates hard constraints")
+    if not 20.0 <= validated["box_y_a"] <= 50.0:
+        raise ValueError("box_y_a violates hard constraints")
+    if not 40.0 <= validated["box_z_a"] <= 100.0:
+        raise ValueError("box_z_a violates hard constraints")
+    if not 1.0 <= validated["nemd_eflux_ev_ps"] <= 3.0:
+        raise ValueError("nemd_eflux_ev_ps violates hard constraints")
     if not 40.0 <= validated["box_x_a"] <= 80.0:
         raise ValueError("box_x_a violates hard constraints")
     if not 40.0 <= validated["box_y_a"] <= 80.0:
@@ -360,7 +368,7 @@ def shell_escape(value: str) -> str:
 
 def write_env_file(path: Path, values: Dict[str, str]) -> None:
     lines = ['{}="{}"'.format(key, shell_escape(value)) for key, value in sorted(values.items())]
-    path.write_text("\n".join(lines) + "\n", encoding="ascii")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def write_lammps_include(path: Path, values: Dict[str, str]) -> None:
