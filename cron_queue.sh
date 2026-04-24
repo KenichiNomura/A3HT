@@ -7,10 +7,6 @@ PLANNER_SCRIPT="${A3HT_PLANNER_SCRIPT:-${ROOT_DIR}/plan_simulation.py}"
 LOOP_STATUS_SCRIPT="${A3HT_LOOP_STATUS_SCRIPT:-${ROOT_DIR}/loop_status.py}"
 JOB_NAME="${A3HT_JOB_NAME:-a3ht}"
 TARGET_JOBS="${A3HT_TARGET_JOBS:-10}"
-DEFAULT_CODEX_BIN="/home/knomura/.nvm/versions/node/v24.14.1/bin/codex"
-DEFAULT_NODE_BIN_DIR="/home/knomura/.nvm/versions/node/v24.14.1/bin"
-export A3HT_CODEX_BIN="${A3HT_CODEX_BIN:-${DEFAULT_CODEX_BIN}}"
-CODEX_BIN_VALUE="${A3HT_CODEX_BIN}"
 DEFAULT_ALCF_MODEL="meta-llama/Meta-Llama-3.1-70B-Instruct"
 export A3HT_ALCF_MODEL="${A3HT_ALCF_MODEL:-${DEFAULT_ALCF_MODEL}}"
 ALCF_MODEL_VALUE="${A3HT_ALCF_MODEL}"
@@ -19,7 +15,7 @@ LOCK_DIR="${STATE_DIR}/lock"
 COUNTER_FILE="${STATE_DIR}/next_seed"
 RETRY_FILE="${STATE_DIR}/resubmit_seeds.txt"
 LOG_FILE="${STATE_DIR}/fill_queue.log"
-PATH="${DEFAULT_NODE_BIN_DIR}:/opt/pbs/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
+PATH="/opt/pbs/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
 
 mkdir -p "${STATE_DIR}"
 
@@ -137,7 +133,10 @@ count_active_jobs() {
 QSUB_CMD="$(require_command qsub)"
 QSTAT_CMD="$(require_command qstat)"
 QSELECT_CMD="$(find_command qselect || true)"
-PYTHON3_CMD="$(require_command python3)"
+PYTHON3_CMD="${A3HT_PYTHON3:-/home/knomura/lammps/.venv/bin/python3}"
+if [ ! -x "${PYTHON3_CMD}" ]; then
+    PYTHON3_CMD="$(require_command python3)"
+fi
 
 if [ ! -f "${JOB_SCRIPT}" ]; then
     printf '%s job script not found: %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${JOB_SCRIPT}" >> "${LOG_FILE}"
@@ -206,9 +205,6 @@ while [ "${submitted}" -lt "${jobs_to_submit}" ]; do
         exit 1
     fi
     qsub_vars="A3HT_SEED=${seed},A3HT_ROOT_DIR=${ROOT_DIR}"
-    if [ -n "${CODEX_BIN_VALUE}" ]; then
-        qsub_vars="${qsub_vars},A3HT_CODEX_BIN=${CODEX_BIN_VALUE}"
-    fi
     if [ -n "${ALCF_MODEL_VALUE}" ]; then
         qsub_vars="${qsub_vars},A3HT_ALCF_MODEL=${ALCF_MODEL_VALUE}"
     fi

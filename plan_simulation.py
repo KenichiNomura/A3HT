@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""Generate per-run simulation plans using ALCF inference endpoint, with codex fallback."""
+"""Generate per-run simulation plans using ALCF inference endpoint, with random fallback."""
 
 import argparse
 import json
 import os
+import random
 import re
-import shutil
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -24,7 +23,6 @@ from autonomy import (
 ROOT = Path(__file__).resolve().parent
 RUNS_ROOT = ROOT / "my_runs"
 SCHEMA_PATH = ROOT / "simulation_plan_schema.json"
-DEFAULT_CODEX_BIN = "/home/knomura/.nvm/versions/node/v24.14.1/bin/codex"
 AUTH_SCRIPT = ROOT / "inference_auth_token.py"
 ALCF_ENDPOINT = "https://inference-api.alcf.anl.gov/resource_server/sophia/vllm/v1"
 ALCF_DEFAULT_MODEL = "meta-llama/Meta-Llama-3.1-70B-Instruct"
@@ -54,14 +52,9 @@ def parse_args() -> argparse.Namespace:
         help="maximum number of recent successful runs to summarize for the planner",
     )
     parser.add_argument(
-        "--disable-codex",
+        "--disable-planner",
         action="store_true",
-        help="skip both ALCF and codex planners; fails unless a cohort reuse is available",
-    )
-    parser.add_argument(
-        "--codex-bin",
-        default=None,
-        help="explicit path or command name for codex (fallback planner)",
+        help="skip ALCF planner; fails unless a cohort reuse is available (no random fallback)",
     )
     parser.add_argument(
         "--alcf-model",
@@ -131,33 +124,6 @@ def planner_prompt(seed: int, history: Dict[str, Any]) -> str:
     )
 
 
-def resolve_codex_bin(explicit_codex_bin: str) -> str:
-    candidates = []
-    if explicit_codex_bin:
-        candidates.append(explicit_codex_bin)
-    env_codex_bin = os.environ.get("A3HT_CODEX_BIN")
-    if env_codex_bin:
-        candidates.append(env_codex_bin)
-    path_codex = shutil.which("codex")
-    if path_codex:
-        candidates.append(path_codex)
-    candidates.append(DEFAULT_CODEX_BIN)
-
-    for candidate in candidates:
-        if not candidate:
-            continue
-        if os.path.isabs(candidate):
-            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-                return candidate
-        else:
-            resolved = shutil.which(candidate)
-            if resolved:
-                return resolved
-
-    raise RuntimeError(
-        "could not locate codex; set A3HT_CODEX_BIN or pass --codex-bin with the full path to the codex executable"
-    )
-
 
 def get_alcf_token(auth_script: Path) -> str:
     python = ALCF_PYTHON if Path(ALCF_PYTHON).is_file() else sys.executable
@@ -216,41 +182,49 @@ def run_alcf_llm(
         raise RuntimeError(f"ALCF LLM returned invalid JSON: {exc}\nRaw response: {raw[:300]}") from exc
 
 
-def run_codex(seed: int, history: Dict[str, Any], output_path: Path, explicit_codex_bin: str) -> Dict[str, Any]:
-    prompt = planner_prompt(seed, history)
-    codex_bin = resolve_codex_bin(explicit_codex_bin)
-    cmd = [
-        codex_bin,
-        "exec",
-        "-C",
-        str(ROOT),
-        "--output-schema",
-        str(SCHEMA_PATH),
-        "-o",
-        str(output_path),
-        "-",
-    ]
-    env = dict(os.environ)
-    env.setdefault("CODEX_DISABLE_TELEMETRY", "1")
-    completed = subprocess.run(
-        cmd,
-        input=prompt,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        universal_newlines=True,
-        cwd=ROOT,
-        env=env,
-        check=False,
-    )
-    if completed.returncode != 0:
-        raise RuntimeError(
-            f"codex exec failed with code {completed.returncode}: "
-            f"{completed.stderr.strip() or completed.stdout.strip()}"
-        )
-    try:
-        return json.loads(output_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"failed to parse codex plan output: {exc}") from exc
+def random_plan(seed: int) -> Dict[str, Any]:
+    rng = random.Random(seed)
+
+    def rnd(lo, hi, step):
+        steps = int((hi - lo) / step)
+        return round(lo + rng.randint(0, steps) * step, 10)
+
+    density  = rnd(1.5, 2.0, 0.05)
+    box_x    = rnd(20.0, 50.0, 5.0)
+    box_y    = rnd(20.0, 50.0, 5.0)
+    box_z    = rnd(40.0, 100.0, 10.0)
+    eflux    = rnd(1.0, 3.0, 0.5)
+
+    return {
+        "reasoning_summary": (
+            f"Random fallback plan (ALCF unavailable): "
+            f"density={density} g/cm3, box={box_x}x{box_y}x{box_z} A, eflux={eflux} eV/ps."
+        ),
+        "uncertainty_strategy": (
+            "Random parameter exploration to maintain throughput while the primary planner is unavailable."
+        ),
+        "recommended_parameters": {
+            "density_g_cm3":          density,
+            "flake_area_a2":          25.0,
+            "box_x_a":                box_x,
+            "box_y_a":                box_y,
+            "box_z_a":                box_z,
+            "anneal_timestep_ps":     0.0002,
+            "anneal_10ps_steps":      50000,
+            "anneal_50ps_steps":      250000,
+            "thermalize_temperature_k": 300.0,
+            "thermalize_timestep_ps": 0.0001,
+            "thermalize_nvt_steps":   300000,
+            "thermalize_npt_steps":   300000,
+            "thermalize_nve_steps":   300000,
+            "nemd_timestep_ps":       0.0001,
+            "nemd_slab_width_a":      5.0,
+            "nemd_freeze_width_a":    5.0,
+            "nemd_bin_size_a":        5.0,
+            "nemd_eflux_ev_ps":       eflux,
+            "nemd_steps":             2000000,
+        },
+    }
 
 
 def validate_positive_number(name: str, value: Any) -> float:
@@ -359,7 +333,7 @@ def build_reuse_plan(seed: int, active_cohort: Dict[str, Any]) -> Dict[str, Any]
 def plan_to_env(seed: int, plan: Dict[str, Any]) -> Dict[str, str]:
     params = plan["recommended_parameters"]
     source = plan["_meta"]["planner_source"]
-    status = "ok" if source in ("alcf_llm", "codex_exec", "cohort_reuse") else "degraded"
+    status = "ok" if source in ("alcf_llm", "cohort_reuse") else "degraded"
     env: Dict[str, str] = {
         "A3HT_PLAN_SOURCE": source,
         "A3HT_PLANNER_STATUS": status,
@@ -458,38 +432,27 @@ def main() -> int:
 
     if loop_state.get("action") == "reuse_active_cohort" and loop_state.get("selected_cohort"):
         plan = build_reuse_plan(args.seed, loop_state["selected_cohort"])
-    elif args.disable_codex:
-        print("error: planning disabled via --disable-codex and no reuse cohort available", file=sys.stderr)
+    elif args.disable_planner:
+        print("error: planner disabled via --disable-planner and no reuse cohort available", file=sys.stderr)
         return 1
     else:
         alcf_model    = args.alcf_model or os.environ.get("A3HT_ALCF_MODEL") or ALCF_DEFAULT_MODEL
         alcf_endpoint = args.alcf_endpoint or ALCF_ENDPOINT
         alcf_auth     = Path(args.alcf_auth_script) if args.alcf_auth_script else AUTH_SCRIPT
 
+        # --- primary: ALCF inference endpoint ---
         candidate = None
         planner_source = None
-
-        # --- primary: ALCF inference endpoint ---
         try:
             candidate = run_alcf_llm(args.seed, history, alcf_model, alcf_endpoint, alcf_auth)
             planner_source = "alcf_llm"
         except Exception as alcf_exc:
-            alcf_error = str(alcf_exc)
+            print(f"warning: ALCF planner failed ({alcf_exc}); using random fallback", file=sys.stderr)
 
-            # --- secondary: codex exec ---
-            try:
-                with tempfile.TemporaryDirectory(prefix="a3ht-plan-", dir=str(run_dir)) as tmp_dir:
-                    output_path = Path(tmp_dir) / "codex_plan.json"
-                    candidate = run_codex(args.seed, history, output_path, args.codex_bin)
-                planner_source = "codex_exec"
-            except Exception as codex_exc:
-                print(
-                    f"error: all planners failed\n"
-                    f"  ALCF: {alcf_error}\n"
-                    f"  codex: {codex_exc}",
-                    file=sys.stderr,
-                )
-                return 1
+        # --- fallback: random parameter exploration ---
+        if candidate is None:
+            candidate = random_plan(args.seed)
+            planner_source = "random_fallback"
 
         try:
             validated = validate_plan(candidate)
