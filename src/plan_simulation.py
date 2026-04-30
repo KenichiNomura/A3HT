@@ -1,5 +1,18 @@
 #!/usr/bin/env python3
-"""Generate per-run simulation plans using ALCF inference endpoint, with random fallback."""
+"""Generate per-run simulation plans using ALCF inference endpoint, with random fallback.
+
+Decision order in main()
+------------------------
+1. If the loop state says reuse_active_cohort, copy the active cohort parameters
+   (no LLM call needed).
+2. Otherwise call the ALCF vLLM endpoint.  If that fails for any reason, fall
+   back to a seeded random parameter draw within the hard constraint bounds.
+3. Validate the candidate plan against the bounds in config.toml [constraints].
+4. Write three artifacts to the run directory:
+     simulation_plan.json  – full plan + _meta (cohort id, goals, source)
+     simulation_plan.env   – shell-sourceable A3HT_* environment variables
+     simulation_plan.lmp   – LAMMPS variable include sourced by anneal/thermalize/nemd
+"""
 
 import argparse
 import json
@@ -20,10 +33,15 @@ from autonomy import (
 )
 from config import get as _cfg, load as _load_config, shell_escape
 
-ROOT = Path(__file__).resolve().parent
+# --- path constants (relative to src/) ---
+ROOT = Path(__file__).resolve().parent          # src/ directory
 SCHEMA_PATH = ROOT / "simulation_plan_schema.json"
 AUTH_SCRIPT = ROOT / "inference_auth_token.py"
 
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -39,7 +57,12 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+# ---------------------------------------------------------------------------
+# History collection for the LLM prompt
+# ---------------------------------------------------------------------------
+
 def collect_history(runs_root: Path, max_history: int) -> Dict[str, Any]:
+    """Return recent successful runs (geometry + kappa) and the current loop state."""
     all_records = collect_run_records(runs_root)
     recent_successes: List[Dict[str, Any]] = []
     for record in reversed(all_records):
@@ -50,6 +73,7 @@ def collect_history(runs_root: Path, max_history: int) -> Dict[str, Any]:
             entry["final_kappa_w_mk"] = record["kappa_w_mk"]
         params = record.get("parameters") or {}
         if params:
+            # Only send the geometry subset to the LLM; full params are in the plan JSON.
             entry["parameters"] = {
                 k: params[k] for k in ("flake_area_a2", "box_x_a", "box_y_a", "box_z_a", "density_g_cm3")
                 if k in params
@@ -61,7 +85,12 @@ def collect_history(runs_root: Path, max_history: int) -> Dict[str, Any]:
     return {"recent_successes": recent_successes, "loop_state": summarize_loop_state(all_records)}
 
 
+# ---------------------------------------------------------------------------
+# ALCF LLM planner
+# ---------------------------------------------------------------------------
+
 def planner_prompt(seed: int, history: Dict[str, Any]) -> str:
+    """Build the user message sent to the LLM. Constraint bounds come from config.toml."""
     c = _load_config()["constraints"]
     return (
         "You are planning the next MD run for this repository.\n\n"
@@ -90,11 +119,17 @@ def run_alcf_llm(
     endpoint: str,
     auth_script: Path,
 ) -> Dict[str, Any]:
+    """Call the ALCF vLLM endpoint and return the parsed JSON plan.
+
+    Auth flow: inference_auth_token.py is invoked as a subprocess to get a
+    short-lived bearer token from the Globus-cached credentials.
+    """
     try:
         from openai import OpenAI
     except ImportError as exc:
         raise RuntimeError("openai package not installed; run: pip install openai") from exc
 
+    # Use the configured Python to invoke the auth helper (may differ from sys.executable).
     python = _cfg("paths.python", sys.executable)
     if not Path(python).is_file():
         python = sys.executable
@@ -134,7 +169,12 @@ def run_alcf_llm(
         raise RuntimeError(f"ALCF LLM returned invalid JSON: {exc}\nRaw: {raw[:300]}") from exc
 
 
+# ---------------------------------------------------------------------------
+# Random fallback plan (used when ALCF is unavailable)
+# ---------------------------------------------------------------------------
+
 def random_plan(seed: int) -> Dict[str, Any]:
+    """Generate a seeded random plan within the config.toml constraint bounds."""
     rng = random.Random(seed)
     c = _load_config()["constraints"]
 
@@ -180,6 +220,10 @@ def random_plan(seed: int) -> Dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# Plan validation
+# ---------------------------------------------------------------------------
+
 def _validate_pos(name: str, value: Any, as_int: bool = False):
     if as_int:
         if not isinstance(value, int):
@@ -193,6 +237,11 @@ def _validate_pos(name: str, value: Any, as_int: bool = False):
 
 
 def validate_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
+    """Type-check, range-check, and return a cleaned copy of the plan.
+
+    Constraint bounds are read from config.toml [constraints] so they stay
+    consistent with the LLM prompt and the random fallback generator.
+    """
     if not isinstance(plan.get("reasoning_summary"), str) or not plan["reasoning_summary"].strip():
         raise ValueError("reasoning_summary must be a non-empty string")
     if not isinstance(plan.get("uncertainty_strategy"), str) or not plan["uncertainty_strategy"].strip():
@@ -236,6 +285,7 @@ def validate_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
         lo, hi = c[constraint_key]
         if not lo <= v[param_key] <= hi:
             raise ValueError(f"{param_key} violates hard constraints [{lo}, {hi}]")
+    # Ensure hot+cold slabs plus frozen ends actually fit inside the box.
     if 2.0 * (v["nemd_freeze_width_a"] + v["nemd_slab_width_a"]) >= v["box_z_a"]:
         raise ValueError("box_z_a is too short for the requested freeze and slab widths")
 
@@ -246,7 +296,15 @@ def validate_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# Cohort-reuse plan builder
+# ---------------------------------------------------------------------------
+
 def build_reuse_plan(seed: int, active_cohort: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a plan that copies the active cohort's parameters verbatim.
+
+    Used when the loop decides reuse_active_cohort — no LLM call required.
+    """
     needed = max(MIN_COHORT_SUCCESS_SEEDS - int(active_cohort.get("evaluable_success_count") or 0), 0)
     return {
         "reasoning_summary": (
@@ -270,11 +328,17 @@ def build_reuse_plan(seed: int, active_cohort: Dict[str, Any]) -> Dict[str, Any]
     }
 
 
+# ---------------------------------------------------------------------------
+# Artifact writers
+# ---------------------------------------------------------------------------
+
 def plan_to_env(seed: int, plan: Dict[str, Any]) -> Dict[str, str]:
+    """Flatten the plan into a dict of A3HT_* shell variable assignments."""
     params = plan["recommended_parameters"]
     source = plan["_meta"]["planner_source"]
     env: Dict[str, str] = {
         "A3HT_PLAN_SOURCE": source,
+        # "degraded" signals to run.sh that the fallback was used.
         "A3HT_PLANNER_STATUS": "ok" if source in ("alcf_llm", "cohort_reuse") else "degraded",
     }
     if plan["_meta"].get("planner_error"):
@@ -306,6 +370,7 @@ def plan_to_env(seed: int, plan: Dict[str, Any]) -> Dict[str, str]:
         "A3HT_NEMD_BIN_SIZE_A":             f"{params['nemd_bin_size_a']:.6f}",
         "A3HT_NEMD_EFLUX_EV_PS":           f"{params['nemd_eflux_ev_ps']:.6f}",
         "A3HT_NEMD_STEPS":                  str(params["nemd_steps"]),
+        # Velocity seeds are derived from the run seed to avoid correlations between stages.
         "A3HT_ANNEAL_VELOCITY_SEED":        str(seed * 1000 + 101),
         "A3HT_THERMALIZE_VELOCITY_SEED":    str(seed * 1000 + 202),
     })
@@ -313,22 +378,30 @@ def plan_to_env(seed: int, plan: Dict[str, Any]) -> Dict[str, str]:
 
 
 def write_env_file(path: Path, values: Dict[str, str]) -> None:
+    """Write shell-sourceable variable assignments (sorted for reproducibility)."""
     lines = ['{}="{}"'.format(k, shell_escape(v)) for k, v in sorted(values.items())]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def write_lammps_include(path: Path, values: Dict[str, str]) -> None:
+    """Write the LAMMPS variable include sourced at the top of anneal/thermalize/nemd.in.
+
+    Fixed annealing temperatures and damping constants come from config.toml [anneal].
+    Per-run timesteps, step counts, and NEMD settings come from the plan env dict.
+    """
     a = _load_config()["anneal"]
     lines = [
+        # Annealing temperature ramp (fixed per campaign, from config.toml)
         f"variable anneal_tstart_k equal {a['tstart_k']}",
         f"variable anneal_t1_k equal {a['t1_k']}",
         f"variable anneal_t2_k equal {a['t2_k']}",
         f"variable anneal_t3_k equal {a['t3_k']}",
         f"variable anneal_t4_k equal {a['t4_k']}",
-        f"variable anneal_t5_k equal {a['t4_k']}",
+        f"variable anneal_t5_k equal {a['t4_k']}",   # t5 holds at t4 for the long 50-ps run
         f"variable anneal_tdamp_ps equal {a['tdamp_ps']}",
         f"variable anneal_pdamp_ps equal {a['pdamp_ps']}",
         f"variable anneal_coord_cutoff_a equal {a['coord_cutoff_a']}",
+        # Per-run MD parameters (from the planner)
         f"variable anneal_timestep_ps equal {values['A3HT_ANNEAL_TIMESTEP_PS']}",
         f"variable anneal_10ps_steps equal {values['A3HT_ANNEAL_10PS_STEPS']}",
         f"variable anneal_50ps_steps equal {values['A3HT_ANNEAL_50PS_STEPS']}",
@@ -352,6 +425,10 @@ def write_lammps_include(path: Path, values: Dict[str, str]) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="ascii")
 
 
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
 def main() -> int:
     args = parse_args()
     run_dir = args.run_dir.resolve()
@@ -360,7 +437,9 @@ def main() -> int:
     history = collect_history(args.runs_root.resolve(), args.max_history)
     loop_state = history["loop_state"]
 
+    # --- choose planning strategy ---
     if loop_state.get("action") == "reuse_active_cohort" and loop_state.get("selected_cohort"):
+        # No LLM call: just copy the existing cohort's parameters.
         plan = build_reuse_plan(args.seed, loop_state["selected_cohort"])
     elif args.disable_planner:
         print("error: planner disabled and no reuse cohort available", file=sys.stderr)
@@ -370,6 +449,7 @@ def main() -> int:
         alcf_endpoint = args.alcf_endpoint or _cfg("alcf.endpoint")
         alcf_auth     = Path(args.alcf_auth_script) if args.alcf_auth_script else AUTH_SCRIPT
 
+        # Primary: ALCF inference endpoint.
         candidate = None
         planner_source = None
         try:
@@ -378,6 +458,7 @@ def main() -> int:
         except Exception as exc:
             print(f"warning: ALCF planner failed ({exc}); using random fallback", file=sys.stderr)
 
+        # Fallback: seeded random draw within constraint bounds.
         if candidate is None:
             candidate = random_plan(args.seed)
             planner_source = "random_fallback"
@@ -403,6 +484,7 @@ def main() -> int:
     plan["_meta"].setdefault("cohort_id", cohort_id_from_parameters(plan["recommended_parameters"]))
     plan["_meta"].setdefault("cohort_seed_target", MIN_COHORT_SUCCESS_SEEDS)
 
+    # --- write artifacts ---
     env_values = plan_to_env(args.seed, plan)
     (run_dir / "simulation_plan.json").write_text(
         json.dumps(plan, indent=2, sort_keys=True) + "\n", encoding="utf-8"

@@ -9,7 +9,7 @@ An end-to-end workflow for turning disordered carbon structures into thermal-con
 
 This repository combines atomistic simulation, transport calculations, and data-driven analysis:
 
-- simulation planning with a Codex-based MD review agent
+- simulation planning with an LLM-based MD review agent (ALCF vLLM endpoint)
 - random glassy-carbon structure generation
 - high-temperature annealing with the Brenner REBO2 potential
 - 300 K equilibration and NEMD thermal conductivity calculations in LAMMPS
@@ -18,20 +18,52 @@ This repository combines atomistic simulation, transport calculations, and data-
 
 > In short: plan -> generate structure -> anneal -> thermalize -> drive heat flux with `eHEX` -> analyze -> train.
 
+See [`flowchart.svg`](flowchart.svg) for a visual overview of the three-lane pipeline (queue loop, PBS job, post-processing).
+
+## Repository Layout
+
+```text
+config.toml                    ← single source of truth for all parameters
+flowchart.svg                  ← pipeline overview diagram
+run.sh                         ← PBS job driver
+cron_queue.sh                  ← autonomous queue-filler (run from cron)
+
+src/
+  config.py                    ← dependency-free TOML loader; shared by all scripts
+  plan_simulation.py           ← LLM-based simulation planner (with random fallback)
+  autonomy.py                  ← cohort state machine and run-record helpers
+  loop_status.py               ← reports loop action (stop / wait / reuse / new cohort)
+  generate_random_carbon.py    ← builds the initial disordered carbon network
+  prepare_resubmits.py         ← queues failed runs for retry
+  build_ml_features.py         ← aggregates per-run outputs into one ML dataset
+  train_xgboost_thermal_conductivity.py  ← XGBoost regressor on the feature table
+  analyze_glassy_carbon.py     ← analyzes a LAMMPS data file or trajectory snapshot
+  analyze_glassy_carbon_trajectory.py   ← time-series analysis of annealing trajectory
+  render_snapshots.py          ← ball-and-stick PNG snapshots for completed runs
+  simulation_plan_schema.json  ← JSON schema enforced on planner output
+  inference_auth_token.py      ← Globus token management for the ALCF endpoint
+
+nemd/
+  anneal.in                    ← staged high-temperature annealing schedule
+  thermalize.in                ← minimization + NVT/NPT/NVE equilibration to 300 K
+  nemd.in                      ← thermal conductivity via fix ehex
+  CH.rebo                      ← Brenner REBO2 parameter file
+```
+
 ## A3HT At A Glance
 
 | Component | Role |
 | --- | --- |
-| `generate_random_carbon.py` | Builds the initial disordered carbon network |
-| `plan_simulation.py` | Proposes an in-bounds simulation plan for each run |
-| `anneal.in` | Reshapes the network through staged high-temperature annealing |
-| `thermalize.in` | Brings the annealed sample to a stable 300 K state |
-| `nemd.in` | Imposes a heat flux and estimates thermal conductivity |
-| `analyze_glassy_carbon*.py` | Extracts structural metrics, distributions, and trajectory trends |
-| `build_ml_features.py` | Aggregates per-run outputs into one ML dataset |
-| `train_xgboost_thermal_conductivity.py` | Learns structure-property relationships from the generated runs |
+| `src/generate_random_carbon.py` | Builds the initial disordered carbon network |
+| `src/plan_simulation.py` | Proposes an in-bounds simulation plan for each run |
+| `nemd/anneal.in` | Reshapes the network through staged high-temperature annealing |
+| `nemd/thermalize.in` | Brings the annealed sample to a stable 300 K state |
+| `nemd/nemd.in` | Imposes a heat flux and estimates thermal conductivity |
+| `src/analyze_glassy_carbon*.py` | Extracts structural metrics, distributions, and trajectory trends |
+| `src/build_ml_features.py` | Aggregates per-run outputs into one ML dataset |
+| `src/train_xgboost_thermal_conductivity.py` | Learns structure-property relationships from the generated runs |
 
-The simulation workflow in this repo is:
+The simulation workflow is:
 
 1. Propose a simulation plan for the next run from recent MD results and the current target goal.
 2. Generate a random carbon starting structure as small graphene-like flakes.
@@ -49,82 +81,81 @@ You will need:
 - Python 3.7 or newer
 - Python packages:
   - `numpy`
+  - `openai` for the ALCF inference endpoint (the planner falls back to random if absent or unavailable)
   - `xgboost` for model training
 - A PBS environment if you want to use `cron_queue.sh` unchanged
 
-Recommended practical setup:
+## Configuration
 
-- a LAMMPS build that supports `fix ehex` and can load the linked runtime libraries
-- the REBO2 parameter file `CH.rebo` available in the repo root
-- multiple independent seeds under the selected runs root (`my_runs/` by default) if you want meaningful ML training data
-- a Globus token for the ALCF inference endpoint (primary planner); authenticate once with `python3 inference_auth_token.py authenticate`
-- a PBS environment if you want to use the included queue-filler unchanged
+All tunable parameters live in **`config.toml`** at the repo root. Edit that file rather than touching any script:
 
-To override the ALCF model (default: `meta-llama/Meta-Llama-3.1-70B-Instruct`):
+```toml
+[paths]
+lammps_dir = "lammps-30Mar2026/build-cray-rebo2"   # relative to repo root
+python     = "/home/knomura/lammps/.venv/bin/python3"
 
-```bash
-export A3HT_ALCF_MODEL=meta-llama/Meta-Llama-3.1-405B-Instruct
+[campaign]
+name         = "kappa10_base90_tilt90"
+initial_seed = 1000
+
+[goals]
+target_kappa_w_mk               = 10.0    # W/m-K — stop when any cohort reaches this
+target_relative_uncertainty_pct = 10.0   # % — and uncertainty is below this
+min_cohort_success_seeds        = 10
+max_simultaneous_cohorts        = 3
+
+[structure]
+base_angle_deg    = 90.0
+angle_disturb_deg = 30.0
+tilt_max_deg      = 30.0
+
+[constraints]
+flake_area_a2    = [25.0, 100.0]
+box_x_a          = [40.0, 80.0]
+box_y_a          = [40.0, 80.0]
+box_z_a          = [80.0, 160.0]
+density_g_cm3    = [1.5, 2.0]
+nemd_eflux_ev_ps = [1.0, 3.0]
 ```
 
-These are especially important for cron and PBS jobs, which often do not inherit your interactive shell startup files.
-
-For a clean high-conductivity campaign that does not mix with older `my_runs/` history, use a separate runs root and state directory:
+Shell scripts load config automatically via:
 
 ```bash
-export A3HT_RUNS_ROOT="${PWD}/campaigns/kappa10_base90_tilt90/my_runs"
-export A3HT_STATE_DIR="${PWD}/campaigns/kappa10_base90_tilt90/.queue_state"
-export A3HT_STRUCTURE_BASE_ANGLE_DEG=90.0
-export A3HT_STRUCTURE_ANGLE_DISTURB_DEG=20.0
-export A3HT_STRUCTURE_TILT_MAX_DEG=90.0
+eval "$(python3 src/config.py --shell-env)"
 ```
 
-The default structure-orientation campaign settings are now a 90 degree base x-tilt plus seed-controlled random x/y tilt up to `+/-90` degrees.
+The `--shell-env` flag emits all campaign variables (`A3HT_RUNS_ROOT`, `A3HT_STATE_DIR`, `LAMMPS_DIR`, structure angles, etc.) as `export` statements. `run.sh` and `cron_queue.sh` both call this at startup so no manual `export` commands are needed.
 
-The default in-repo LAMMPS executable used by `run.sh` is:
+To authenticate with the ALCF inference endpoint (needed once before the first cron run):
 
-`lammps-30Mar2026/build-cray-rebo2/lmp`
+```bash
+python3 src/inference_auth_token.py authenticate
+```
 
-`run.sh` also prepends the build directory to `LD_LIBRARY_PATH` so the executable can resolve its linked runtime libraries in batch jobs.
+Tokens are cached in `~/.globus/` and refreshed automatically for up to 30 days. If the ALCF endpoint is unavailable, the planner falls back to random parameter exploration so jobs are never blocked.
 
+To override the maximum number of simultaneous cohorts at runtime without editing `config.toml`:
 
-## Main Files
-
-- `run.sh`: end-to-end driver for environment checks, optional simulation planning, structure generation, annealing, thermalization, and NEMD
-- `cron_queue.sh`: drives the autonomous loop by checking cohort stop/wait conditions once per queue-fill invocation, planning each submitted run before `qsub`, and prioritizing retry seeds from `.queue_state/resubmit_seeds.txt`
-- `plan_simulation.py`: uses the ALCF inference endpoint to choose per-run simulation parameters, or reuses active-cohort parameters; falls back to random parameter exploration if ALCF is unavailable; validates hard constraints and writes run-local plan artifacts
-- `loop_status.py`: reports whether the autonomous loop should stop, wait for the active cohorts, reuse a selected cohort, or open a new cohort
-- `autonomy.py`: shared cohort statistics, terminal-run record caching, and stop-condition logic
-- `simulation_plan_schema.json`: JSON schema enforced on planner output
-- `prepare_resubmits.py`: finds failed/incomplete runs, purges their run directories, and writes the retry queue for cron
-- `generate_random_carbon.py`: creates a random carbon network from rotated graphene-like flakes
-- `anneal.in`: high-temperature annealing schedule using the Brenner REBO2 potential
-- `thermalize.in`: minimization plus NVT/NPT/NVE equilibration before transport calculation
-- `nemd.in`: thermal conductivity calculation with `fix ehex`
-- `analyze_glassy_carbon.py`: analyzes a LAMMPS data file or trajectory snapshot
-- `analyze_glassy_carbon_trajectory.py`: analyzes an annealing trajectory as a time series
-- `build_ml_features.py`: collects analysis outputs into one ML feature table
-- `train_xgboost_thermal_conductivity.py`: trains an XGBoost regressor on the feature table
+```bash
+export A3HT_MAX_SIMULTANEOUS_COHORTS=5
+```
 
 ## Simulation Workflow
 
-The simulation side of A3HT is organized as a compact planned pipeline before analysis: propose the next in-bounds run, build a candidate carbon network, structurally relax it through annealing and equilibration, then measure transport under a controlled non-equilibrium heat flux.
-
 ### 1. Plan the next simulation
 
-`cron_queue.sh` calls the planner before `qsub`, and `run.sh` calls it after environment checks pass if the plan artifacts are still missing:
+`cron_queue.sh` calls the planner before `qsub`, and `run.sh` calls it after environment checks pass if plan artifacts are still missing:
 
 ```bash
-python3 plan_simulation.py --seed 123 --run-dir my_runs/123 --runs-root my_runs
+python3 src/plan_simulation.py --seed 123 --run-dir my_runs/123 --runs-root my_runs
 ```
 
-The planner:
+The planner (in priority order):
 
-- summarizes recent successful runs from the selected runs root
-- tries the ALCF inference endpoint first
-- reuses the active cohort parameters when repeated same-parameter seeds are still needed
-- validates the result against the current hard bounds
-- falls back to random parameter exploration when the ALCF planner is unavailable
-- fails with a non-zero exit code if validation fails, or if planner use is explicitly disabled and no reusable cohort exists
+1. reuses the selected active-cohort parameters when repeated same-parameter seeds are still needed
+2. tries the ALCF inference endpoint for a new-cohort plan
+3. falls back to random parameter exploration if ALCF is unavailable
+4. fails with a non-zero exit code only when `--disable-planner` is set and no reusable cohort exists
 
 Each run gets:
 
@@ -132,55 +163,32 @@ Each run gets:
 - `simulation_plan.env`
 - `simulation_plan.lmp`
 
-Current hard geometry constraints are:
+Current hard geometry constraints (from `config.toml [constraints]`):
 
-- flake area: `25-100 A^2`
-- box `x`: `20-50 A`
-- box `y`: `20-50 A`
-- box `z`: `40-100 A`
-- `nemd_eflux_ev_ps`: `1-3 eV/ps`
-
-The current target goal encoded in the planner is:
-
-- thermal conductivity target: `10 W/m-K`
-- relative uncertainty target: `< 10%`
-- minimum evaluable seeds per cohort: `10`
-- maximum simultaneous open cohorts: `3` by default
-
-The same physical parameter set is repeated with different random seeds within a cohort until at least 10 evaluable seeds are available for uncertainty estimation. The autonomous loop may keep up to 3 open cohorts in flight at the same time by default.
+- flake area: `25–100 Å²`
+- box `x`: `40–80 Å`
+- box `y`: `40–80 Å`
+- box `z`: `80–160 Å`
+- density: `1.5–2.0 g/cm³`
+- `nemd_eflux_ev_ps`: `1–3 eV/ps`
 
 The autonomous loop stops submitting new jobs when any cohort reaches:
 
 - mean thermal conductivity `>= 10 W/m-K`
 - relative uncertainty `< 10%`
-- at least `10` evaluable seeds in that cohort
-
-The relative uncertainty is computed from the standard error of the cohort mean thermal conductivity.
+- at least `10` evaluable seeds
 
 ### 2. Generate the initial structure
 
-`run.sh` calls:
+`run.sh` calls `src/generate_random_carbon.py` with box, density, flake-area, and orientation parameters from the per-run plan and structure settings from `config.toml [structure]`.
 
-```bash
-./generate_random_carbon.py \
-  --box "${A3HT_STRUCTURE_BOX_X_A}" "${A3HT_STRUCTURE_BOX_Y_A}" "${A3HT_STRUCTURE_BOX_Z_A}" \
-  --density "${A3HT_STRUCTURE_DENSITY_G_CM3}" \
-  --seed 123 \
-  --output random_carbon.extxyz \
-  --flake-area "${A3HT_FLAKE_AREA_A2}" \
-  --base-angle-deg "${A3HT_STRUCTURE_BASE_ANGLE_DEG:-90.0}" \
-  --angle-disturb-deg "${A3HT_STRUCTURE_ANGLE_DISTURB_DEG:-20.0}" \
-  --tilt-max-deg "${A3HT_STRUCTURE_TILT_MAX_DEG:-90.0}" \
-  --format lammps
-```
+`--base-angle-deg` is a fixed rotation about x applied to every flake. `--tilt-max-deg` controls the seed-dependent random x/y tilt range.
 
-The generated file is then renamed to `random_carbon.dat` and used as the LAMMPS input structure.
-
-`--base-angle-deg` is a fixed rotation about x applied to every flake. `--tilt-max-deg` controls the seed-dependent random x/y tilt range; with the current defaults, each flake gets random x and y tilt components sampled from `[-90, 90]` degrees.
+If the box is too tight to place all atoms without overlap, the packer reduces the flake area in steps and emits a warning to stderr; it returns whatever atoms it managed to place (the achieved density printed to stdout reflects the actual count).
 
 ### 3. Anneal the structure
 
-`anneal.in`:
+`nemd/anneal.in`:
 
 - includes `simulation_plan.lmp`
 - reads `random_carbon.dat`
@@ -188,15 +196,13 @@ The generated file is then renamed to `random_carbon.dat` and used as the LAMMPS
 - minimizes the initial configuration
 - applies staged NVT annealing with plan-provided timestep, run length, and velocity seed
 
-The annealing schedule is:
+The annealing schedule (temperatures from `config.toml [anneal]`):
 
 - 2500 K for 10 ps
 - 3000 K for 10 ps
 - 3500 K for 10 ps
 - 4000 K for 10 ps
 - 4000 K for 50 ps
-
-This stage is where the initially random flake assembly is driven toward a more connected glassy-carbon network.
 
 Outputs include:
 
@@ -207,15 +213,13 @@ Outputs include:
 
 ### 4. Thermalize the annealed structure
 
-`thermalize.in`:
+`nemd/thermalize.in`:
 
 - includes `simulation_plan.lmp`
 - reads `gc_rebo2.restart`
 - shifts the periodic cell so wrapped `z` coordinates stay non-negative
 - minimizes the annealed structure
 - equilibrates with plan-provided temperature, timestep, stage lengths, and velocity seed
-
-This separates structural preparation from the transport calculation so the NEMD run starts from an already relaxed state.
 
 Outputs include:
 
@@ -224,7 +228,7 @@ Outputs include:
 
 ### 5. Run NEMD thermal conductivity
 
-`nemd.in`:
+`nemd/nemd.in`:
 
 - includes `simulation_plan.lmp`
 - reads `gc_rebo2.restart`
@@ -239,18 +243,7 @@ fix coldflux all ehex 1000 -${nemd_eflux_ev_ps} region cold
 ```
 
 - computes a temperature profile along `z`
-- computes running hot and cold slab temperatures
 - estimates the thermal conductivity from the imposed heat flux and measured temperature drop
-
-The transport setup uses frozen boundary slabs plus hot/cold exchange regions, so the calculation is a direct non-equilibrium estimate rather than an equilibrium fluctuation method.
-
-Important NEMD settings are provided by the per-run plan:
-
-- `dt` — timestep (ps)
-- `slabw` — hot/cold slab width (Å)
-- `freezew` — frozen boundary slab width (Å)
-- `eflux` — planner-controlled, constrained to `1-3 eV/ps`
-- `nemd_steps` — total MD steps
 
 The conductivity reported in `nemd.in` is:
 
@@ -268,230 +261,118 @@ Outputs include:
 
 ## Running the Full Workflow
 
-For a standard run, you only need a seed, a valid LAMMPS executable, and the `CH.rebo` parameter file in the repo root. If the environment checks pass and a per-run plan does not already exist, `run.sh` will generate one automatically.
-
-The main driver is:
-
 ```bash
 bash run.sh --seed 123 --ntasks 32 --processors auto
 ```
 
-Options supported by `run.sh`:
+Options:
 
 - `--seed N`: random seed for the generated carbon structure
 - `--ntasks N`: MPI task count passed to `mpiexec` or `mpirun`
 - `--processors auto|Px,Py,Pz`: LAMMPS processor grid
 
-Example with an explicit processor grid:
+Each run is written under `${A3HT_RUNS_ROOT:-my_runs}/<seed>/` with:
 
-```bash
-bash run.sh --seed 101 --ntasks 32 --processors 4,4,2
-```
-
-Each run is written under:
-
-`${A3HT_RUNS_ROOT:-my_runs}/<seed>/`
-
-with logs:
-
-- `anneal.log`
-- `thermalize.log`
-- `nemd.log`
-- `run_status.txt`
-- `run_failure.txt` when a run exits unsuccessfully
-
-and planning artifacts:
-
-- `simulation_plan.json`
-- `simulation_plan.env`
-- `simulation_plan.lmp`
-
-These plan artifacts record the cohort id, planner source, target conductivity, target uncertainty, and the minimum evaluable-seed count for the cohort.
-
-and simulation outputs under:
-
-`${A3HT_RUNS_ROOT:-my_runs}/<seed>/data/`
-
-`run_status.txt` contains one of:
-
-- `SUCCESS`
-- `FAILED`
-- `RUNNING`
-
-If a run fails, `run_failure.txt` records the UTC timestamp, failing stage, and message.
+- logs: `anneal.log`, `thermalize.log`, `nemd.log`
+- status: `run_status.txt` (`SUCCESS` / `FAILED` / `RUNNING`)
+- failure detail: `run_failure.txt` (UTC timestamp, failing stage, message)
+- planning artifacts: `simulation_plan.json`, `simulation_plan.env`, `simulation_plan.lmp`
+- simulation outputs under `data/`
 
 ## Queue Management and Resubmission
-
-The repository includes a lightweight PBS queue-filler:
 
 ```bash
 bash cron_queue.sh
 ```
 
-The planner requires a valid Globus token for the ALCF inference endpoint. Authenticate once interactively before relying on the cron workflow:
+At each invocation `cron_queue.sh` checks the current cohort status:
+
+- `stop`: a cohort already meets the target — no new jobs
+- `wait_active_cohorts`: all cohort slots are full and each has enough running jobs — no new jobs
+- `reuse_active_cohort`: the next seed reuses the selected open cohort's parameters
+- `plan_new_cohort`: a fresh LLM plan is generated for a new cohort
+
+The loop status cache lives at `${A3HT_STATE_DIR}/.queue_state/run_records_cache.json`. Terminal `SUCCESS` and `FAILED` records are cached so repeated cron invocations do not re-parse completed run directories. If you manually edit a completed run's status or final conductivity, delete this cache so the next invocation rebuilds it.
+
+Brand-new runs use successive seeds from `${A3HT_STATE_DIR}/next_seed`. Retry seeds from `${A3HT_STATE_DIR}/resubmit_seeds.txt` are consumed first.
+
+To purge and requeue failed or incomplete runs:
 
 ```bash
-python3 inference_auth_token.py authenticate
+python3 src/prepare_resubmits.py --purge-run-dirs
 ```
 
-Tokens are cached in `~/.globus/` and refreshed automatically for up to 30 days. If the ALCF endpoint is unavailable, the planner falls back to random parameter exploration so jobs are never blocked.
-
-`cron_queue.sh` forwards `A3HT_ALCF_MODEL` into `qsub`.
-
-`cron_queue.sh` also forwards `A3HT_ROOT_DIR`, `A3HT_RUNS_ROOT`, `A3HT_STATE_DIR`, and the structure-orientation variables into `qsub`, so batch jobs resolve paths and campaign settings consistently even when cron starts from `$HOME`.
-
-To override the default number of simultaneous cohorts, set:
+To also include stale `RUNNING` directories after manual inspection:
 
 ```bash
-export A3HT_MAX_SIMULTANEOUS_COHORTS=3
-```
-
-By default it tries to keep up to `A3HT_TARGET_JOBS` jobs in the scheduler, subject to the autonomous loop stop/wait rules, and submits at most `A3HT_TARGET_JOBS - active_jobs` new jobs in one invocation. Brand-new runs use successive seeds from:
-
-`${A3HT_STATE_DIR:-.queue_state}/next_seed`
-
-At the start of each queue-fill invocation, `cron_queue.sh` checks the current cohort status:
-
-- `stop`: no new jobs are submitted because a cohort already meets the target
-- `wait_active_cohorts`: no new jobs are submitted because the maximum number of simultaneous cohorts is already open and each has enough running jobs to potentially reach the minimum cohort size
-- `reuse_active_cohort`: the next seed reuses the selected open cohort parameters
-- `plan_new_cohort`: a fresh plan is generated for a new cohort
-
-When a submission is needed, `cron_queue.sh` creates `${A3HT_RUNS_ROOT:-my_runs}/<seed>/simulation_plan.*` so the submitted job already has a validated parameter set and cohort assignment.
-
-The loop status scanner caches terminal `SUCCESS` and `FAILED` records in:
-
-`${A3HT_STATE_DIR:-.queue_state}/run_records_cache.json`
-
-This avoids repeatedly parsing completed run directories while cron is filling the queue. Terminal statuses are treated as immutable; if you manually edit a completed run's status, plan, or final conductivity, delete this cache file so the next loop-status check rebuilds it from the selected runs root.
-
-If:
-
-- a run crashes
-- a job times out
-- the environment check fails
-- or you want to purge and resubmit incomplete runs
-
-use:
-
-```bash
-python3 prepare_resubmits.py --purge-run-dirs
-```
-
-This script:
-
-- scans the selected runs root for non-successful runs
-- queues failed seeds in `${A3HT_STATE_DIR:-.queue_state}/resubmit_seeds.txt`
-- writes a manifest to `${A3HT_STATE_DIR:-.queue_state}/resubmit_manifest.json`
-- removes the corresponding run directories before retry so stale partial outputs do not survive into the resubmission
-
-`cron_queue.sh` consumes `.queue_state/resubmit_seeds.txt` before it advances `.queue_state/next_seed`, so retries are submitted ahead of brand-new seeds.
-
-The default behavior is conservative: it queues `FAILED` runs and leaves currently `RUNNING` runs untouched. If you intentionally want to include stale `RUNNING` directories after manual inspection, use:
-
-```bash
-python3 prepare_resubmits.py --purge-run-dirs --include-running
+python3 src/prepare_resubmits.py --purge-run-dirs --include-running
 ```
 
 ## Failure Notes
 
-A common failure mode is an executable or batch environment that cannot load the runtime libraries linked into the selected LAMMPS build. In that case `run.sh` will fail during `environment_check` and write a `run_failure.txt` entry such as:
+A common failure mode is an executable or batch environment that cannot load the runtime libraries linked into the selected LAMMPS build. `run.sh` will fail at `environment_check` and write a `run_failure.txt` entry such as:
 
 ```text
 stage=environment_check
 message=... error while loading shared libraries: ...
 ```
 
-Those runs are safe to purge and requeue after you provide the required runtime library path or point `LAMMPS_BIN`/`LAMMPS_DIR` at a working build. The intended default configuration is:
-
-```bash
-export LAMMPS_DIR=/lus/grand/projects/QuantMatManufact/knomura/a3ht/lammps-30Mar2026/build-cray-rebo2
-export LAMMPS_BIN=$LAMMPS_DIR/lmp
-export LD_LIBRARY_PATH=$LAMMPS_DIR:/lus/grand/projects/QuantMatManufact/knomura/glassycarbons/lammps-build/kim_build-prefix/lib:$LD_LIBRARY_PATH
-```
-
-If you keep the default `run.sh` paths, you should not need to set these manually unless your batch environment strips `LD_LIBRARY_PATH`. The current default build is `build-cray-rebo2`.
+`run.sh` builds `LD_LIBRARY_PATH` automatically from `config.toml [runtime_libs]` via `python3 src/config.py --ld-library-path`. Add or remove directories in that section rather than exporting the variable by hand.
 
 ## Post-Processing
-
-Once a run finishes, the analysis scripts turn raw LAMMPS outputs into summaries that are easier to inspect, compare, and use for ML.
 
 ### Analyze a single structure or final trajectory frame
 
 ```bash
-python analyze_glassy_carbon.py my_runs/123/data/anneal_gc_rebo2.data
+python3 src/analyze_glassy_carbon.py my_runs/123/data/anneal_gc_rebo2.data
 ```
 
 or:
 
 ```bash
-python analyze_glassy_carbon.py my_runs/123/data/gc_rebo2_nemd.lammpstrj \
+python3 src/analyze_glassy_carbon.py my_runs/123/data/gc_rebo2_nemd.lammpstrj \
   --output-dir my_runs/123/analysis/nemd
 ```
-
-This script writes JSON, CSV, and SVG summaries such as:
-
-- `summary.json`
-- `bond_length_distribution.csv`
-- `bond_angle_distribution.csv`
-- `rdf.csv`
-- `coordination_histogram.csv`
 
 ### Analyze the annealing trajectory
 
 ```bash
-python analyze_glassy_carbon_trajectory.py \
+python3 src/analyze_glassy_carbon_trajectory.py \
   my_runs/123/data/anneal_gc_rebo2.lammpstrj \
   --coordination-log my_runs/123/data/anneal_gc_rebo2_coordination.dat \
   --output-dir my_runs/123/analysis/anneal_timeseries
 ```
 
-This produces a time-series summary in:
+### Render ball-and-stick snapshots
 
-`my_runs/123/analysis/anneal_timeseries/trajectory_summary.csv`
+```bash
+python3 src/render_snapshots.py
+```
+
+Renders `snapshot.png` into each run directory that has NEMD data. Requires a separate `build-dump-image` LAMMPS build (path set in `config.toml [paths]`).
 
 ## Building the ML Dataset
 
-The ML pipeline is designed around many completed runs under `my_runs/`, where each seed acts as one structure-processing-transport sample.
-
-After you have multiple completed runs in `my_runs/`, build the feature table with:
-
 ```bash
-python build_ml_features.py --runs-root my_runs --output-csv ml_features.csv
+python3 src/build_ml_features.py --runs-root my_runs --output-csv ml_features.csv
 ```
 
-If analysis outputs are missing, generate them automatically:
+To generate missing analysis outputs automatically:
 
 ```bash
-python build_ml_features.py \
+python3 src/build_ml_features.py \
   --runs-root my_runs \
   --generate-missing-analysis \
   --output-csv ml_features.csv \
   --summary-json ml_features_summary.json
 ```
 
-The target extracted from each run is the final thermal conductivity in:
-
-`my_runs/<seed>/data/gc_rebo2_hotcold.dat`
-
-The feature builder uses:
-
-- annealed snapshot metrics
-- final NEMD snapshot metrics
-- annealing trajectory summary statistics
-- histogram-derived descriptors
-- final hot/cold slab temperatures and conductivity target
-
 A column-by-column overview of the ML inputs is in [FEATURE_GUIDE.md](FEATURE_GUIDE.md).
 
 ## Training the XGBoost Model
 
-With `ml_features.csv` in place, the final step is a supervised regression model that maps structural descriptors to the final NEMD conductivity target.
-
-Train the regression model with:
-
 ```bash
-python train_xgboost_thermal_conductivity.py \
+python3 src/train_xgboost_thermal_conductivity.py \
   --features-csv ml_features.csv \
   --output-dir xgboost_thermal_conductivity_model
 ```
@@ -507,9 +388,8 @@ Outputs include:
 ## Notes and Assumptions
 
 - `run.sh` is written for PBS and launches LAMMPS through `mpiexec` or `mpirun`.
-- If the ALCF planner is unavailable, `plan_simulation.py` falls back to random parameter exploration within the hard constraints so the workflow always continues.
+- If the ALCF planner is unavailable, `src/plan_simulation.py` falls back to random parameter exploration within the hard constraints so the workflow always continues.
 - Cohorts are defined by identical physical simulation parameters; random seeds differ within a cohort.
-- The repository contains local LAMMPS build directories, but the documented requirement is a LAMMPS executable that supports `fix ehex` and can load its linked runtime libraries.
 - The NEMD method implemented here is a direct heat-flux approach using `eHEX`, not Green-Kubo.
 
 ## Typical Output Layout
@@ -524,6 +404,7 @@ my_runs/
     simulation_plan.json
     simulation_plan.env
     simulation_plan.lmp
+    snapshot.png
     data/
       anneal_gc_rebo2.data
       anneal_gc_rebo2.lammpstrj

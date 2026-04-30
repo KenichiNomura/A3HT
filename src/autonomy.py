@@ -1,5 +1,18 @@
 #!/usr/bin/env python3
-"""Helpers for autonomous cohort control in A3HT."""
+"""Cohort state machine and run-record helpers for the A3HT autonomous loop.
+
+A *cohort* is a group of simulation runs that share identical physical
+parameters (box, density, flake geometry, MD schedule).  Different seeds
+within a cohort produce independent structures so their thermal conductivities
+can be averaged to estimate uncertainty.
+
+The stop condition is met when any cohort has:
+  - mean kappa  >= target_kappa_w_mk  (target thermal conductivity)
+  - stderr/mean <  target_relative_uncertainty_pct / 100
+  - at least    >= min_cohort_success_seeds  evaluable runs
+
+All thresholds are read from config.toml [goals].
+"""
 
 import hashlib
 import json
@@ -14,6 +27,7 @@ from config import load as _load_config
 ROOT = Path(__file__).resolve().parent.parent  # repo root
 RUNS_ROOT = Path(os.environ.get("A3HT_RUNS_ROOT", str(ROOT / "my_runs")))
 
+# --- goal constants (from config.toml [goals]) ---
 _goals = _load_config()["goals"]
 TARGET_KAPPA_W_MK               = _goals["target_kappa_w_mk"]
 TARGET_RELATIVE_UNCERTAINTY_PCT = _goals["target_relative_uncertainty_pct"]
@@ -22,6 +36,10 @@ MAX_SIMULTANEOUS_COHORTS        = int(
     os.environ.get("A3HT_MAX_SIMULTANEOUS_COHORTS", _goals["max_simultaneous_cohorts"])
 )
 
+
+# ---------------------------------------------------------------------------
+# Low-level file helpers
+# ---------------------------------------------------------------------------
 
 def read_text(path: Path) -> Optional[str]:
     if not path.is_file():
@@ -33,6 +51,11 @@ def read_text(path: Path) -> Optional[str]:
 
 
 def read_last_kappa(hotcold_file: Path) -> Optional[float]:
+    """Return the final thermal conductivity (W/m-K) from a gc_rebo2_hotcold.dat file.
+
+    The file has comment lines starting with '#' and data rows where column 6
+    (0-indexed: 5) is the running kappa estimate.  We take the last data row.
+    """
     text = read_text(hotcold_file)
     if not text:
         return None
@@ -48,12 +71,26 @@ def read_last_kappa(hotcold_file: Path) -> Optional[float]:
         return None
 
 
+# ---------------------------------------------------------------------------
+# Cohort identification
+# ---------------------------------------------------------------------------
+
 def cohort_id_from_parameters(parameters: Dict[str, Any]) -> str:
+    """Stable 12-char hex digest of the sorted parameter dict.
+
+    Two runs with identical recommended_parameters get the same cohort_id
+    regardless of the order keys appear in the JSON.
+    """
     payload = json.dumps({k: parameters[k] for k in sorted(parameters)}, sort_keys=True, separators=(",", ":"))
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
 
 
+# ---------------------------------------------------------------------------
+# Per-run plan loading
+# ---------------------------------------------------------------------------
+
 def load_plan(run_dir: Path) -> Optional[Dict[str, Any]]:
+    """Load simulation_plan.json from a run directory, patching in cohort_id if absent."""
     plan_json = run_dir / "simulation_plan.json"
     if not plan_json.is_file():
         return None
@@ -73,6 +110,10 @@ def load_plan(run_dir: Path) -> Optional[Dict[str, Any]]:
     meta.setdefault("cohort_id", cohort_id_from_parameters(params))
     return payload
 
+
+# ---------------------------------------------------------------------------
+# Run-record cache (terminal states never change, so they are cached to disk)
+# ---------------------------------------------------------------------------
 
 _TERMINAL_STATUSES = {"SUCCESS", "FAILED"}
 
@@ -98,6 +139,12 @@ def _save_records_cache(cache_file: Path, cache: Dict[int, Dict[str, Any]]) -> N
 
 
 def collect_run_records(runs_root: Path, cache_file: Optional[Path] = None) -> List[Dict[str, Any]]:
+    """Scan runs_root and return one record dict per seed directory.
+
+    Terminal runs (SUCCESS / FAILED) are served from a JSON cache on disk so
+    repeated calls during one queue-fill cycle do not re-parse completed
+    directories.  Only RUNNING / PLANNED runs are re-read every time.
+    """
     if cache_file is None:
         state_dir = Path(os.environ.get("A3HT_STATE_DIR", str(runs_root.parent / ".queue_state")))
         cache_file = state_dir / "run_records_cache.json"
@@ -162,6 +209,10 @@ def collect_run_records(runs_root: Path, cache_file: Optional[Path] = None) -> L
     return records
 
 
+# ---------------------------------------------------------------------------
+# Cohort statistics and loop-action decision
+# ---------------------------------------------------------------------------
+
 def _sample_stddev(values: List[float]) -> Optional[float]:
     if len(values) < 2:
         return None
@@ -177,6 +228,16 @@ def summarize_loop_state(
     min_cohort_success_seeds: int = MIN_COHORT_SUCCESS_SEEDS,
     max_simultaneous_cohorts: int = MAX_SIMULTANEOUS_COHORTS,
 ) -> Dict[str, Any]:
+    """Aggregate run records by cohort and return the next loop action.
+
+    Possible actions
+    ----------------
+    stop                 A cohort met the kappa + uncertainty target.
+    plan_new_cohort      There is room to open a fresh parameter set.
+    reuse_active_cohort  All cohort slots are full; add seeds to the neediest one.
+    wait_active_cohorts  All slots are full and each has enough running jobs; do nothing.
+    """
+    # --- group records into per-cohort accumulators ---
     cohorts = {}  # type: Dict[str, Dict[str, Any]]
     for record in records:
         cohort_id = record.get("cohort_id")
@@ -213,6 +274,7 @@ def summarize_loop_state(
         if isinstance(kappa, (int, float)):
             cohort["kappa_values"].append(float(kappa))
 
+    # --- compute statistics for each cohort and check stop condition ---
     cohort_list = []  # type: List[Dict[str, Any]]
     for cohort in cohorts.values():
         kappa_values = list(cohort["kappa_values"])
@@ -252,8 +314,12 @@ def summarize_loop_state(
         }
         cohort_list.append(cohort_summary)
 
+    # Sort by most-recently-used cohort so the newest work appears last.
     cohort_list.sort(key=lambda item: (item["latest_seed"], item["first_seed"]))
 
+    # --- decide action ---
+
+    # If any cohort already met the target, report stop immediately.
     stop_cohort = None
     for cohort in cohort_list:
         if cohort["stop_met"]:
@@ -287,14 +353,17 @@ def summarize_loop_state(
             "cohorts": cohort_list,
         }
 
+    # Active cohorts still need more evaluable seeds to reach min_cohort_success_seeds.
     active_cohorts = [
         cohort for cohort in cohort_list if cohort["evaluable_success_count"] < min_cohort_success_seeds
     ]
+    # Reusable = active cohorts that cannot reach the minimum even with all their pending jobs.
     reusable_cohorts = [
         cohort
         for cohort in active_cohorts
         if cohort["evaluable_success_count"] + cohort["pending_count"] < min_cohort_success_seeds
     ]
+    # Prefer the cohort with the fewest total planned seeds (least investment so far).
     reusable_cohorts.sort(
         key=lambda cohort: (
             cohort["planned_count"],

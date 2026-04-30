@@ -11,6 +11,7 @@ interatomic separation.
 import argparse
 import math
 import random
+import sys
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -314,17 +315,27 @@ def graphene_flake_positions(
     tilt_max_deg: float = DEFAULT_TILT_MAX_DEG,
 ) -> List[Tuple[float, float, float]]:
     rng = random.Random(seed)
-    target_flake_atoms = flake_atom_count_from_area(flake_area)
     flake_cache: Dict[int, List[Tuple[float, float, float]]] = {}
     min_distance_sq = MIN_INTERATOMIC_DISTANCE**2
-    flake_sizes = choose_flake_sizes(atom_count, target_flake_atoms)
 
-    for _restart in range(MAX_PACKING_RESTARTS):
-        positions: List[Tuple[float, float, float]] = []
-        spatial_grid = SpatialGrid(box_lengths, MIN_INTERATOMIC_DISTANCE)
-        placement_failed = False
+    positions: List[Tuple[float, float, float]] = []
+    spatial_grid = SpatialGrid(box_lengths, MIN_INTERATOMIC_DISTANCE)
+    remaining = atom_count
+    current_flake_area = flake_area
 
-        for flake_size in flake_sizes:
+    while remaining > 0:
+        if current_flake_area <= 0.0:
+            print(
+                f"WARNING: could not place {remaining} of {atom_count} atoms; "
+                "flake area reduced to zero.",
+                file=sys.stderr,
+            )
+            break
+
+        phase_sizes = choose_flake_sizes(remaining, flake_atom_count_from_area(current_flake_area))
+        placed_this_phase = 0
+
+        for flake_size in phase_sizes:
             flake = flake_cache.setdefault(flake_size, generate_graphene_flake(flake_size))
             for _ in range(MAX_PLACEMENT_ATTEMPTS):
                 # Apply a seed-controlled orientation protocol: fixed base x-tilt,
@@ -338,9 +349,7 @@ def graphene_flake_positions(
                     if tilt_max_deg > 0.0:
                         tx = rng.uniform(-tilt_max_deg, tilt_max_deg)
                         ty = rng.uniform(-tilt_max_deg, tilt_max_deg)
-                        Rx_tilt = rotation_about_x(tx)
-                        Ry_tilt = rotation_about_y(ty)
-                        rotation = mat_mul(Ry_tilt, mat_mul(Rx_tilt, mat_mul(Rz, Rbase)))
+                        rotation = mat_mul(rotation_about_y(ty), mat_mul(rotation_about_x(tx), mat_mul(Rz, Rbase)))
                     else:
                         rotation = mat_mul(Rz, Rbase)
 
@@ -350,18 +359,18 @@ def graphene_flake_positions(
                 if not spatial_grid.has_overlap(candidate, min_distance_sq):
                     positions.extend(candidate)
                     spatial_grid.add_points(candidate)
+                    placed_this_phase += flake_size
                     break
             else:
-                placement_failed = True
+                # Flake could not be placed — keep atoms placed so far, shrink flake area.
+                remaining -= placed_this_phase
+                current_flake_area -= 10.0
                 break
+        else:
+            # All flakes in this phase placed successfully.
+            remaining = 0
 
-        if not placement_failed:
-            return positions
-
-    raise RuntimeError(
-        "could not place all flakes without overlap; "
-        "try a larger box, lower density, or smaller --flake-area"
-    )
+    return positions
 
 
 def write_extxyz(
@@ -498,7 +507,8 @@ def main() -> None:
         args.angle_disturb_deg,
         args.tilt_max_deg,
     )
-    achieved_density = achieved_density_g_cm3(atom_count, box_lengths)
+    actual_count = len(positions)
+    achieved_density = achieved_density_g_cm3(actual_count, box_lengths)
 
     if output_format == "extxyz":
         write_extxyz(args.output, positions, box_lengths)
@@ -508,7 +518,7 @@ def main() -> None:
     print(f"target_density_g_cm3: {args.density:.8f}")
     print(f"achieved_density_g_cm3: {achieved_density:.8f}")
     print(f"box_A: {box_lengths[0]:.8f} {box_lengths[1]:.8f} {box_lengths[2]:.8f}")
-    print(f"num_atoms: {atom_count}")
+    print(f"num_atoms: {actual_count}")
     print(f"flake_area_A2: {args.flake_area:.8f}")
     print(f"base_angle_deg: {args.base_angle_deg:.8f}")
     print(f"angle_disturb_deg: {args.angle_disturb_deg:.8f}")
