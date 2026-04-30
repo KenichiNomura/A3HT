@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional
 
 from config import load as _load_config
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent  # repo root
 RUNS_ROOT = Path(os.environ.get("A3HT_RUNS_ROOT", str(ROOT / "my_runs")))
 
 _goals = _load_config()["goals"]

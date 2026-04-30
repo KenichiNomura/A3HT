@@ -21,7 +21,7 @@ from typing import Dict, List, Optional, Tuple
 
 from autonomy import read_text as _read_text_from_autonomy
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent  # repo root
 DEFAULT_RUNS_ROOT = Path(os.environ.get("A3HT_RUNS_ROOT", str(ROOT / "my_runs")))
 DEFAULT_STATE_DIR = Path(os.environ.get("A3HT_STATE_DIR", str(DEFAULT_RUNS_ROOT.parent / ".queue_state")))
 

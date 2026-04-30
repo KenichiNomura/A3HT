@@ -30,7 +30,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--runs-root", type=Path,
-                        default=Path(os.environ.get("A3HT_RUNS_ROOT", str(ROOT / "my_runs"))))
+                        default=Path(os.environ.get("A3HT_RUNS_ROOT", str(ROOT.parent / "my_runs"))))
     parser.add_argument("--max-history", type=int, default=_cfg("alcf.max_history", 10))
     parser.add_argument("--disable-planner", action="store_true")
     parser.add_argument("--alcf-model", default=None)

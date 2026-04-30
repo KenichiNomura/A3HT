@@ -19,8 +19,8 @@ fi
 cd "${rootdir}"
 
 # Load paths and queue settings from config.toml
-eval "$("${rootdir}/config.py" --shell-env)"
-export LD_LIBRARY_PATH="$("${rootdir}/config.py" --ld-library-path)"
+eval "$("${rootdir}/src/config.py" --shell-env)"
+export LD_LIBRARY_PATH="$("${rootdir}/src/config.py" --ld-library-path)"
 
 stage="startup"
 run_dir=""
@@ -58,7 +58,7 @@ finish_run() {
 trap finish_run EXIT
 
 LAMMPS_BIN="${LAMMPS_BIN:-${LAMMPS_DIR}/lmp}"
-PLANNER_SCRIPT="${A3HT_PLANNER_SCRIPT:-${rootdir}/plan_simulation.py}"
+PLANNER_SCRIPT="${A3HT_PLANNER_SCRIPT:-${rootdir}/src/plan_simulation.py}"
 RUNS_ROOT="${A3HT_RUNS_ROOT}"
 echo "${LAMMPS_BIN}"
 
@@ -134,7 +134,7 @@ fi
 
 stage="environment_check"
 [[ -x "${LAMMPS_BIN}" ]] || fail "LAMMPS executable not found: ${LAMMPS_BIN}"
-[[ -f "${rootdir}/CH.rebo" ]] || fail "REBO2 parameter file not found: ${rootdir}/CH.rebo"
+[[ -f "${rootdir}/nemd/CH.rebo" ]] || fail "REBO2 parameter file not found: ${rootdir}/nemd/CH.rebo"
 
 cd "${run_dir}"
 
@@ -159,7 +159,7 @@ echo "Plan source: ${A3HT_PLAN_SOURCE}  cohort: ${A3HT_COHORT_ID}  target_kappa:
 echo "Orientation: base=${structure_base_angle_deg} disturb=${structure_angle_disturb_deg} tilt=${structure_tilt_max_deg}"
 
 stage="structure_generation"
-"${rootdir}/generate_random_carbon.py" \
+"${rootdir}/src/generate_random_carbon.py" \
     --box "${A3HT_STRUCTURE_BOX_X_A}" "${A3HT_STRUCTURE_BOX_Y_A}" "${A3HT_STRUCTURE_BOX_Z_A}" \
     --density "${A3HT_STRUCTURE_DENSITY_G_CM3}" \
     --seed "${seed}" \
@@ -170,7 +170,7 @@ stage="structure_generation"
     --tilt-max-deg "${structure_tilt_max_deg}" \
     --format lammps
 mv random_carbon.extxyz random_carbon.dat
-cp -v "${rootdir}/CH.rebo" CH.rebo
+cp -v "${rootdir}/nemd/CH.rebo" CH.rebo
 
 run_lammps() {
     local log_file="$1" input_file="$2"
@@ -181,12 +181,12 @@ run_lammps() {
 }
 
 stage="anneal"
-run_lammps anneal.log "${rootdir}/anneal.in"
+run_lammps anneal.log "${rootdir}/nemd/anneal.in"
 cp -v data/anneal_gc_rebo2.restart gc_rebo2.restart
 
 stage="thermalize"
-run_lammps thermalize.log "${rootdir}/thermalize.in"
+run_lammps thermalize.log "${rootdir}/nemd/thermalize.in"
 cp -v data/gc_rebo2_thermalize.restart gc_rebo2.restart
 
 stage="nemd"
-run_lammps nemd.log "${rootdir}/nemd.in"
+run_lammps nemd.log "${rootdir}/nemd/nemd.in"

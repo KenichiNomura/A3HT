@@ -29,8 +29,8 @@ from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 import numpy as np
 
 
-ROOT = Path(__file__).resolve().parent
-DEFAULT_RUNS_ROOT = Path(os.environ.get("A3HT_RUNS_ROOT", str(ROOT / "my_runs")))
+ROOT = Path(__file__).resolve().parent  # src/ dir (analysis scripts live here)
+DEFAULT_RUNS_ROOT = Path(os.environ.get("A3HT_RUNS_ROOT", str(ROOT.parent / "my_runs")))
 ANALYZE_SNAPSHOT = ROOT / "analyze_glassy_carbon.py"
 ANALYZE_TRAJECTORY = ROOT / "analyze_glassy_carbon_trajectory.py"
 
@@ -95,12 +95,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--output-csv",
-        default=str(ROOT / "ml_features.csv"),
+        default=str(ROOT.parent / "ml_features.csv"),
         help="output feature table CSV path",
     )
     parser.add_argument(
         "--summary-json",
-        default=str(ROOT / "ml_features_summary.json"),
+        default=str(ROOT.parent / "ml_features_summary.json"),
         help="output summary/manifest JSON path",
     )
     parser.add_argument(

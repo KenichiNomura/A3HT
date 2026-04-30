@@ -24,7 +24,7 @@ def parse_args():
 
 def main():
     args = parse_args()
-    default_runs_root = Path(os.environ.get("A3HT_RUNS_ROOT", str(Path(__file__).resolve().parent / "my_runs")))
+    default_runs_root = Path(os.environ.get("A3HT_RUNS_ROOT", str(Path(__file__).resolve().parent.parent / "my_runs")))
     runs_root = (args.runs_root or default_runs_root).resolve()
     records = collect_run_records(runs_root)
     summary = summarize_loop_state(records)

@@ -4,15 +4,15 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Load all campaign/queue parameters from config.toml
-eval "$("${ROOT_DIR}/config.py" --shell-env)"
+eval "$("${ROOT_DIR}/src/config.py" --shell-env)"
 # Sets: A3HT_RUNS_ROOT, A3HT_STATE_DIR, A3HT_STRUCTURE_BASE_ANGLE_DEG,
 #       A3HT_STRUCTURE_ANGLE_DISTURB_DEG, A3HT_STRUCTURE_TILT_MAX_DEG,
 #       A3HT_ALCF_MODEL, A3HT_TARGET_JOBS, A3HT_JOB_NAME,
 #       A3HT_INITIAL_SEED, LAMMPS_DIR, A3HT_PYTHON3
 
 JOB_SCRIPT="${A3HT_JOB_SCRIPT:-${ROOT_DIR}/run.sh}"
-PLANNER_SCRIPT="${A3HT_PLANNER_SCRIPT:-${ROOT_DIR}/plan_simulation.py}"
-LOOP_STATUS_SCRIPT="${A3HT_LOOP_STATUS_SCRIPT:-${ROOT_DIR}/loop_status.py}"
+PLANNER_SCRIPT="${A3HT_PLANNER_SCRIPT:-${ROOT_DIR}/src/plan_simulation.py}"
+LOOP_STATUS_SCRIPT="${A3HT_LOOP_STATUS_SCRIPT:-${ROOT_DIR}/src/loop_status.py}"
 STATE_DIR="${A3HT_STATE_DIR}"
 LOCK_DIR="${STATE_DIR}/lock"
 COUNTER_FILE="${STATE_DIR}/next_seed"

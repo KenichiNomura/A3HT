@@ -26,7 +26,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--features-csv",
-        default=str(Path(__file__).resolve().parent / "ml_features.csv"),
+        default=str(Path(__file__).resolve().parent.parent / "ml_features.csv"),
         help="input feature table from build_ml_features.py",
     )
     parser.add_argument(
@@ -36,7 +36,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--output-dir",
-        default=str(Path(__file__).resolve().parent / "xgboost_thermal_conductivity_model"),
+        default=str(Path(__file__).resolve().parent.parent / "xgboost_thermal_conductivity_model"),
         help="directory for model and reports",
     )
     parser.add_argument("--test-fraction", type=float, default=0.2, help="holdout fraction when enough samples exist")
