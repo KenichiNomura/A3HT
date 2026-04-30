@@ -50,18 +50,18 @@
         },
         "box_x_a": {
           "type": "number",
-          "minimum": 20.0,
-          "maximum": 50.0
+          "minimum": 40.0,
+          "maximum": 80.0
         },
         "box_y_a": {
           "type": "number",
-          "minimum": 20.0,
-          "maximum": 50.0
+          "minimum": 40.0,
+          "maximum": 80.0
         },
         "box_z_a": {
           "type": "number",
-          "minimum": 40.0,
-          "maximum": 100.0
+          "minimum": 80.0,
+          "maximum": 160.0
         },
         "anneal_timestep_ps": {
           "type": "number",

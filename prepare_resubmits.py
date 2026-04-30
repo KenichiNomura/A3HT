@@ -12,15 +12,18 @@ and stores a manifest of the queued seeds plus the failure reasons.
 
 import argparse
 import json
+import os
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 
+from autonomy import read_text as _read_text_from_autonomy
+
 ROOT = Path(__file__).resolve().parent
-DEFAULT_RUNS_ROOT = ROOT / "my_runs"
-DEFAULT_STATE_DIR = ROOT / ".queue_state"
+DEFAULT_RUNS_ROOT = Path(os.environ.get("A3HT_RUNS_ROOT", str(ROOT / "my_runs")))
+DEFAULT_STATE_DIR = Path(os.environ.get("A3HT_STATE_DIR", str(DEFAULT_RUNS_ROOT.parent / ".queue_state")))
 
 
 def parse_args() -> argparse.Namespace:
@@ -58,10 +61,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def read_text(path: Path) -> Optional[str]:
-    if not path.exists():
-        return None
-    return path.read_text(encoding="utf-8").strip()
+read_text = _read_text_from_autonomy
 
 
 def parse_failure(path: Path) -> Tuple[Optional[str], Optional[str]]:

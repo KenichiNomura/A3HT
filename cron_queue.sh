@@ -2,15 +2,18 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Load all campaign/queue parameters from config.toml
+eval "$("${ROOT_DIR}/config.py" --shell-env)"
+# Sets: A3HT_RUNS_ROOT, A3HT_STATE_DIR, A3HT_STRUCTURE_BASE_ANGLE_DEG,
+#       A3HT_STRUCTURE_ANGLE_DISTURB_DEG, A3HT_STRUCTURE_TILT_MAX_DEG,
+#       A3HT_ALCF_MODEL, A3HT_TARGET_JOBS, A3HT_JOB_NAME,
+#       A3HT_INITIAL_SEED, LAMMPS_DIR, A3HT_PYTHON3
+
 JOB_SCRIPT="${A3HT_JOB_SCRIPT:-${ROOT_DIR}/run.sh}"
 PLANNER_SCRIPT="${A3HT_PLANNER_SCRIPT:-${ROOT_DIR}/plan_simulation.py}"
 LOOP_STATUS_SCRIPT="${A3HT_LOOP_STATUS_SCRIPT:-${ROOT_DIR}/loop_status.py}"
-JOB_NAME="${A3HT_JOB_NAME:-a3ht}"
-TARGET_JOBS="${A3HT_TARGET_JOBS:-10}"
-DEFAULT_ALCF_MODEL="meta-llama/Meta-Llama-3.1-70B-Instruct"
-export A3HT_ALCF_MODEL="${A3HT_ALCF_MODEL:-${DEFAULT_ALCF_MODEL}}"
-ALCF_MODEL_VALUE="${A3HT_ALCF_MODEL}"
-STATE_DIR="${A3HT_STATE_DIR:-${ROOT_DIR}/.queue_state}"
+STATE_DIR="${A3HT_STATE_DIR}"
 LOCK_DIR="${STATE_DIR}/lock"
 COUNTER_FILE="${STATE_DIR}/next_seed"
 RETRY_FILE="${STATE_DIR}/resubmit_seeds.txt"
@@ -27,170 +30,98 @@ if ! mkdir "${LOCK_DIR}" 2>/dev/null; then
     printf '%s another queue-fill run is still active\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> "${LOG_FILE}"
     exit 0
 fi
+trap 'rmdir "${LOCK_DIR}"' EXIT INT TERM
 
-cleanup() {
-    rmdir "${LOCK_DIR}"
-}
-
-trap cleanup EXIT INT TERM
-
-find_command() {
+require_cmd() {
     cmd_name="$1"
-
     if command -v "${cmd_name}" >/dev/null 2>&1; then
-        command -v "${cmd_name}"
-        return 0
+        command -v "${cmd_name}"; return 0
     fi
-
-    for candidate in \
-        "/opt/pbs/bin/${cmd_name}" \
-        "/usr/local/pbs/bin/${cmd_name}" \
-        "/usr/pbs/bin/${cmd_name}"
-    do
-        if [ -x "${candidate}" ]; then
-            printf '%s\n' "${candidate}"
-            return 0
-        fi
+    for candidate in "/opt/pbs/bin/${cmd_name}" "/usr/local/pbs/bin/${cmd_name}" "/usr/pbs/bin/${cmd_name}"; do
+        if [ -x "${candidate}" ]; then printf '%s\n' "${candidate}"; return 0; fi
     done
-
-    return 1
-}
-
-require_command() {
-    resolved_path="$(find_command "$1" || true)"
-    if [ -z "${resolved_path}" ]; then
-        printf '%s missing required command: %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$1" >> "${LOG_FILE}"
-        exit 1
-    fi
-
-    printf '%s\n' "${resolved_path}"
+    printf '%s missing required command: %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${cmd_name}" >> "${LOG_FILE}"
+    exit 1
 }
 
 peek_next_seed() {
-    if [ ! -f "${COUNTER_FILE}" ]; then
-        printf '1000\n' > "${COUNTER_FILE}"
-    fi
-
+    if [ ! -f "${COUNTER_FILE}" ]; then printf '%s\n' "${A3HT_INITIAL_SEED:-1000}" > "${COUNTER_FILE}"; fi
     cat "${COUNTER_FILE}"
 }
 
-advance_next_seed() {
-    seed="$1"
-    next_value=$((seed + 1))
-    printf '%s\n' "${next_value}" > "${COUNTER_FILE}"
-}
+advance_next_seed() { printf '%s\n' "$(($1 + 1))" > "${COUNTER_FILE}"; }
 
 peek_retry_seed() {
-    if [ ! -f "${RETRY_FILE}" ]; then
-        return 1
-    fi
-
-    awk '
-        NF == 0 {next}
-        $0 ~ /^[[:space:]]*#/ {next}
-        {print $1; exit}
-    ' "${RETRY_FILE}"
+    [ -f "${RETRY_FILE}" ] || return 1
+    awk 'NF && !/^[[:space:]]*#/ {print $1; exit}' "${RETRY_FILE}"
 }
 
 consume_retry_seed() {
-    seed="$1"
-
-    if [ ! -f "${RETRY_FILE}" ]; then
-        return 0
-    fi
-
-    tmp_file="${RETRY_FILE}.tmp"
-    awk -v seed="${seed}" '
-        BEGIN {removed = 0}
-        NF == 0 {next}
-        $0 ~ /^[[:space:]]*#/ {next}
-        !removed && $1 == seed {removed = 1; next}
-        {print}
-    ' "${RETRY_FILE}" > "${tmp_file}"
-    mv "${tmp_file}" "${RETRY_FILE}"
+    [ -f "${RETRY_FILE}" ] || return 0
+    awk -v seed="$1" 'BEGIN{r=0} NF && !/^[[:space:]]*#/ && !r && $1==seed {r=1;next} {print}' \
+        "${RETRY_FILE}" > "${RETRY_FILE}.tmp"
+    mv "${RETRY_FILE}.tmp" "${RETRY_FILE}"
 }
 
 count_active_jobs() {
     if [ -n "${QSELECT_CMD:-}" ]; then
-        qselect_output="$("${QSELECT_CMD}" -u "${USER}" -N "${JOB_NAME}")" || return 1
-        if [ -z "${qselect_output}" ]; then
-            printf '0\n'
-        else
-            printf '%s\n' "${qselect_output}" | wc -l | awk '{print $1}'
-        fi
+        out="$("${QSELECT_CMD}" -u "${USER}" -N "${A3HT_JOB_NAME}")" || return 1
+        [ -z "${out}" ] && printf '0\n' || printf '%s\n' "${out}" | wc -l | awk '{print $1}'
         return
     fi
-
-    qstat_output="$("${QSTAT_CMD}" -u "${USER}")" || return 1
-    printf '%s\n' "${qstat_output}" | awk -v user="${USER}" -v name="${JOB_NAME}" '
-        $0 ~ /^Job/ {next}
-        $0 ~ /^---/ {next}
-        NF >= 5 && $2 == name && $3 == user {count++}
-        END {print count + 0}
-    '
+    "$QSTAT_CMD" -u "${USER}" | awk -v n="${A3HT_JOB_NAME}" -v u="${USER}" \
+        '!/^Job/ && !/^---/ && NF>=5 && $2==n && $3==u {c++} END{print c+0}'
 }
 
-QSUB_CMD="$(require_command qsub)"
-QSTAT_CMD="$(require_command qstat)"
-QSELECT_CMD="$(find_command qselect || true)"
-PYTHON3_CMD="${A3HT_PYTHON3:-/home/knomura/lammps/.venv/bin/python3}"
-if [ ! -x "${PYTHON3_CMD}" ]; then
-    PYTHON3_CMD="$(require_command python3)"
-fi
+QSUB_CMD="$(require_cmd qsub)"
+QSTAT_CMD="$(require_cmd qstat)"
+QSELECT_CMD="$(command -v qselect 2>/dev/null || true)"
+PYTHON3_CMD="${A3HT_PYTHON3:-python3}"
+if [ ! -x "${PYTHON3_CMD}" ]; then PYTHON3_CMD="$(require_cmd python3)"; fi
 
-if [ ! -f "${JOB_SCRIPT}" ]; then
-    printf '%s job script not found: %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${JOB_SCRIPT}" >> "${LOG_FILE}"
-    exit 1
-fi
-
-if [ ! -f "${PLANNER_SCRIPT}" ]; then
-    printf '%s planner script not found: %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${PLANNER_SCRIPT}" >> "${LOG_FILE}"
-    exit 1
-fi
-
-if [ ! -f "${LOOP_STATUS_SCRIPT}" ]; then
-    printf '%s loop status script not found: %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${LOOP_STATUS_SCRIPT}" >> "${LOG_FILE}"
-    exit 1
-fi
-
-if ! active_jobs="$(count_active_jobs)"; then
-    printf '%s failed to query active jobs via scheduler\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> "${LOG_FILE}"
-    exit 1
-fi
-
-case "${active_jobs}" in
-    ''|*[!0-9]*)
-        printf '%s failed to determine active job count: %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${active_jobs}" >> "${LOG_FILE}"
+for f in "${JOB_SCRIPT}" "${PLANNER_SCRIPT}" "${LOOP_STATUS_SCRIPT}"; do
+    if [ ! -f "${f}" ]; then
+        printf '%s file not found: %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${f}" >> "${LOG_FILE}"
         exit 1
-        ;;
+    fi
+done
+
+active_jobs="$(count_active_jobs)" || {
+    printf '%s failed to query active jobs\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> "${LOG_FILE}"
+    exit 1
+}
+
+case "${active_jobs}" in ''|*[!0-9]*)
+    printf '%s bad active job count: %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${active_jobs}" >> "${LOG_FILE}"
+    exit 1
 esac
 
-case "${TARGET_JOBS}" in
-    ''|*[!0-9]*)
-        printf '%s invalid target job count: %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${TARGET_JOBS}" >> "${LOG_FILE}"
-        exit 1
-        ;;
-esac
-
-if [ "${active_jobs}" -ge "${TARGET_JOBS}" ]; then
-    printf '%s active=%s target=%s submitted=0\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${active_jobs}" "${TARGET_JOBS}" >> "${LOG_FILE}"
+if [ "${active_jobs}" -ge "${A3HT_TARGET_JOBS}" ]; then
+    printf '%s active=%s target=%s submitted=0\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${active_jobs}" "${A3HT_TARGET_JOBS}" >> "${LOG_FILE}"
     exit 0
 fi
 
-jobs_to_submit=$((TARGET_JOBS - active_jobs))
+loop_env="$("${PYTHON3_CMD}" "${LOOP_STATUS_SCRIPT}" --runs-root "${A3HT_RUNS_ROOT}" --format env)"
+eval "${loop_env}"
+
+if [ "${A3HT_LOOP_STOP_CONDITION_MET}" = "1" ]; then
+    printf '%s stop_condition_met=1 action=%s submitted=0\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${A3HT_LOOP_ACTION}" >> "${LOG_FILE}"
+    exit 0
+fi
+if [ "${A3HT_LOOP_ACTION}" = "wait_active_cohorts" ]; then
+    printf '%s action=%s active_cohort_count=%s submitted=0\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${A3HT_LOOP_ACTION}" "${A3HT_ACTIVE_COHORT_COUNT}" >> "${LOG_FILE}"
+    exit 0
+fi
+
+jobs_to_submit=$((A3HT_TARGET_JOBS - active_jobs))
 submitted=0
+qsub_vars="A3HT_ROOT_DIR=${ROOT_DIR},A3HT_RUNS_ROOT=${A3HT_RUNS_ROOT},A3HT_STATE_DIR=${STATE_DIR}"
+qsub_vars="${qsub_vars},A3HT_STRUCTURE_BASE_ANGLE_DEG=${A3HT_STRUCTURE_BASE_ANGLE_DEG}"
+qsub_vars="${qsub_vars},A3HT_STRUCTURE_ANGLE_DISTURB_DEG=${A3HT_STRUCTURE_ANGLE_DISTURB_DEG}"
+qsub_vars="${qsub_vars},A3HT_STRUCTURE_TILT_MAX_DEG=${A3HT_STRUCTURE_TILT_MAX_DEG}"
+[ -n "${A3HT_ALCF_MODEL}" ] && qsub_vars="${qsub_vars},A3HT_ALCF_MODEL=${A3HT_ALCF_MODEL}"
 
 while [ "${submitted}" -lt "${jobs_to_submit}" ]; do
-    loop_env="$("${PYTHON3_CMD}" "${LOOP_STATUS_SCRIPT}" --runs-root "${ROOT_DIR}/my_runs" --format env)"
-    eval "${loop_env}"
-    if [ "${A3HT_LOOP_STOP_CONDITION_MET}" = "1" ]; then
-        printf '%s stop_condition_met=1 action=%s reason=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${A3HT_LOOP_ACTION}" "${A3HT_LOOP_REASON}" >> "${LOG_FILE}"
-        break
-    fi
-    if [ "${A3HT_LOOP_ACTION}" = "wait_active_cohorts" ]; then
-        printf '%s action=%s active_cohort_count=%s reason=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${A3HT_LOOP_ACTION}" "${A3HT_ACTIVE_COHORT_COUNT}" "${A3HT_LOOP_REASON}" >> "${LOG_FILE}"
-        break
-    fi
     seed_source="next_seed"
     seed="$(peek_retry_seed || true)"
     if [ -n "${seed}" ]; then
@@ -198,27 +129,22 @@ while [ "${submitted}" -lt "${jobs_to_submit}" ]; do
     else
         seed="$(peek_next_seed)"
     fi
-    run_dir="${ROOT_DIR}/my_runs/${seed}"
+    run_dir="${A3HT_RUNS_ROOT}/${seed}"
     mkdir -p "${run_dir}"
-    if ! planner_result="$("${PYTHON3_CMD}" "${PLANNER_SCRIPT}" --seed "${seed}" --run-dir "${run_dir}")"; then
-        printf '%s planning failed for seed=%s source=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${seed}" "${seed_source}" >> "${LOG_FILE}"
+    if ! planner_result="$("${PYTHON3_CMD}" "${PLANNER_SCRIPT}" --seed "${seed}" --run-dir "${run_dir}" --runs-root "${A3HT_RUNS_ROOT}")"; then
+        printf '%s planning failed seed=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${seed}" >> "${LOG_FILE}"
         exit 1
     fi
-    qsub_vars="A3HT_SEED=${seed},A3HT_ROOT_DIR=${ROOT_DIR}"
-    if [ -n "${ALCF_MODEL_VALUE}" ]; then
-        qsub_vars="${qsub_vars},A3HT_ALCF_MODEL=${ALCF_MODEL_VALUE}"
-    fi
-    if ! job_id="$("${QSUB_CMD}" -N "${JOB_NAME}" -v "${qsub_vars}" "${JOB_SCRIPT}")"; then
-        printf '%s qsub failed for seed=%s source=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${seed}" "${seed_source}" >> "${LOG_FILE}"
+    if ! job_id="$("${QSUB_CMD}" -N "${A3HT_JOB_NAME}" -v "${qsub_vars},A3HT_SEED=${seed}" "${JOB_SCRIPT}")"; then
+        printf '%s qsub failed seed=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${seed}" >> "${LOG_FILE}"
         exit 1
     fi
-    if [ "${seed_source}" = "retry_queue" ]; then
-        consume_retry_seed "${seed}"
-    else
-        advance_next_seed "${seed}"
-    fi
-    printf '%s planner=%s seed=%s source=%s action=%s selected_cohort=%s active_cohort_count=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${planner_result}" "${seed}" "${seed_source}" "${A3HT_LOOP_ACTION}" "${A3HT_SELECTED_COHORT_ID}" "${A3HT_ACTIVE_COHORT_COUNT}" >> "${LOG_FILE}"
-    printf '%s submitted job_id=%s seed=%s source=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${job_id}" "${seed}" "${seed_source}" >> "${LOG_FILE}"
+    if [ "${seed_source}" = "retry_queue" ]; then consume_retry_seed "${seed}"; else advance_next_seed "${seed}"; fi
+    submitted=$((submitted + 1))
+    printf '%s planner=%s seed=%s source=%s action=%s cohort=%s\n' \
+        "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${planner_result}" "${seed}" "${seed_source}" \
+        "${A3HT_LOOP_ACTION}" "${A3HT_SELECTED_COHORT_ID}" >> "${LOG_FILE}"
+    printf '%s submitted job_id=%s seed=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${job_id}" "${seed}" >> "${LOG_FILE}"
 done
 
-printf '%s active=%s target=%s submitted=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${active_jobs}" "${TARGET_JOBS}" "${submitted}" >> "${LOG_FILE}"
+printf '%s active=%s target=%s submitted=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${active_jobs}" "${A3HT_TARGET_JOBS}" "${submitted}" >> "${LOG_FILE}"

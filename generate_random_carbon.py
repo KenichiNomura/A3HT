@@ -24,13 +24,24 @@ GRAPHENE_AREA_PER_ATOM = 3.0 * math.sqrt(3.0) * GRAPHENE_BOND_LENGTH**2 / 4.0
 DEFAULT_FLAKE_ATOM_COUNT = 24
 DEFAULT_FLAKE_AREA = DEFAULT_FLAKE_ATOM_COUNT * GRAPHENE_AREA_PER_ATOM
 MIN_INTERATOMIC_DISTANCE = 1.2  # A
-MAX_PLACEMENT_ATTEMPTS = 1000
+MAX_PLACEMENT_ATTEMPTS = 10000
+MAX_PACKING_RESTARTS = 10
+DEFAULT_BASE_ANGLE_DEG = 90.0
+DEFAULT_ANGLE_DISTURB_DEG = 20.0
+DEFAULT_TILT_MAX_DEG = 90.0
 
 
 def positive_float(value: str) -> float:
     number = float(value)
     if number <= 0.0:
         raise argparse.ArgumentTypeError("value must be positive")
+    return number
+
+
+def non_negative_float(value: str) -> float:
+    number = float(value)
+    if number < 0.0:
+        raise argparse.ArgumentTypeError("value must be non-negative")
     return number
 
 
@@ -149,6 +160,50 @@ def random_rotation_matrix(rng: random.Random) -> Tuple[Tuple[float, float, floa
     )
 
 
+def rotation_about_z(angle_deg: float) -> Tuple[Tuple[float, float, float], ...]:
+    """Return a rotation matrix for a rotation about the z axis by angle_deg."""
+    theta = math.radians(angle_deg)
+    c = math.cos(theta)
+    s = math.sin(theta)
+    return (
+        (c, -s, 0.0),
+        (s,  c, 0.0),
+        (0.0, 0.0, 1.0),
+    )
+
+
+def rotation_about_x(angle_deg: float) -> Tuple[Tuple[float, float, float], ...]:
+    """Rotation matrix about x axis."""
+    theta = math.radians(angle_deg)
+    c = math.cos(theta)
+    s = math.sin(theta)
+    return (
+        (1.0, 0.0, 0.0),
+        (0.0, c, -s),
+        (0.0, s,  c),
+    )
+
+
+def rotation_about_y(angle_deg: float) -> Tuple[Tuple[float, float, float], ...]:
+    """Rotation matrix about y axis."""
+    theta = math.radians(angle_deg)
+    c = math.cos(theta)
+    s = math.sin(theta)
+    return (
+        (c, 0.0, s),
+        (0.0, 1.0, 0.0),
+        (-s, 0.0, c),
+    )
+
+
+def mat_mul(A: Tuple[Tuple[float, float, float], ...], B: Tuple[Tuple[float, float, float], ...]) -> Tuple[Tuple[float, float, float], ...]:
+    """Multiply two 3x3 matrices A * B."""
+    return tuple(
+        tuple(sum(A[i][k] * B[k][j] for k in range(3)) for j in range(3))
+        for i in range(3)
+    )
+
+
 def rotate_point(
     point: Tuple[float, float, float],
     rotation: Tuple[Tuple[float, float, float], ...],
@@ -254,33 +309,59 @@ def graphene_flake_positions(
     box_lengths: Tuple[float, float, float],
     flake_area: float,
     seed: Optional[int],
+    base_angle_deg: float = DEFAULT_BASE_ANGLE_DEG,
+    angle_disturb_deg: float = DEFAULT_ANGLE_DISTURB_DEG,
+    tilt_max_deg: float = DEFAULT_TILT_MAX_DEG,
 ) -> List[Tuple[float, float, float]]:
     rng = random.Random(seed)
     target_flake_atoms = flake_atom_count_from_area(flake_area)
     flake_cache: Dict[int, List[Tuple[float, float, float]]] = {}
-    positions: List[Tuple[float, float, float]] = []
     min_distance_sq = MIN_INTERATOMIC_DISTANCE**2
-    spatial_grid = SpatialGrid(box_lengths, MIN_INTERATOMIC_DISTANCE)
+    flake_sizes = choose_flake_sizes(atom_count, target_flake_atoms)
 
-    for flake_size in choose_flake_sizes(atom_count, target_flake_atoms):
-        flake = flake_cache.setdefault(flake_size, generate_graphene_flake(flake_size))
-        candidate = None
-        for _ in range(MAX_PLACEMENT_ATTEMPTS):
-            rotation = random_rotation_matrix(rng)
-            candidate = try_place_flake(flake, rotation, box_lengths, rng)
-            if candidate is None:
-                continue
-            if not spatial_grid.has_overlap(candidate, min_distance_sq):
-                positions.extend(candidate)
-                spatial_grid.add_points(candidate)
+    for _restart in range(MAX_PACKING_RESTARTS):
+        positions: List[Tuple[float, float, float]] = []
+        spatial_grid = SpatialGrid(box_lengths, MIN_INTERATOMIC_DISTANCE)
+        placement_failed = False
+
+        for flake_size in flake_sizes:
+            flake = flake_cache.setdefault(flake_size, generate_graphene_flake(flake_size))
+            for _ in range(MAX_PLACEMENT_ATTEMPTS):
+                # Apply a seed-controlled orientation protocol: fixed base x-tilt,
+                # random in-plane z rotation, and optional random x/y tilt.
+                if base_angle_deg is None:
+                    rotation = random_rotation_matrix(rng)
+                else:
+                    inplane = rng.uniform(-angle_disturb_deg, angle_disturb_deg)
+                    Rz = rotation_about_z(inplane)
+                    Rbase = rotation_about_x(base_angle_deg)
+                    if tilt_max_deg > 0.0:
+                        tx = rng.uniform(-tilt_max_deg, tilt_max_deg)
+                        ty = rng.uniform(-tilt_max_deg, tilt_max_deg)
+                        Rx_tilt = rotation_about_x(tx)
+                        Ry_tilt = rotation_about_y(ty)
+                        rotation = mat_mul(Ry_tilt, mat_mul(Rx_tilt, mat_mul(Rz, Rbase)))
+                    else:
+                        rotation = mat_mul(Rz, Rbase)
+
+                candidate = try_place_flake(flake, rotation, box_lengths, rng)
+                if candidate is None:
+                    continue
+                if not spatial_grid.has_overlap(candidate, min_distance_sq):
+                    positions.extend(candidate)
+                    spatial_grid.add_points(candidate)
+                    break
+            else:
+                placement_failed = True
                 break
-        else:
-            raise RuntimeError(
-                "could not place all flakes without overlap; "
-                "try a larger box, lower density, or smaller --flake-area"
-            )
 
-    return positions
+        if not placement_failed:
+            return positions
+
+    raise RuntimeError(
+        "could not place all flakes without overlap; "
+        "try a larger box, lower density, or smaller --flake-area"
+    )
 
 
 def write_extxyz(
@@ -372,6 +453,33 @@ def parse_args() -> argparse.Namespace:
         default="round",
         help="how to convert the exact atom count from density to an integer (default: round)",
     )
+    parser.add_argument(
+        "--base-angle-deg",
+        type=float,
+        default=DEFAULT_BASE_ANGLE_DEG,
+        help=(
+            "base rotation angle about x in degrees applied to all flakes "
+            f"(default: {DEFAULT_BASE_ANGLE_DEG:.1f})"
+        ),
+    )
+    parser.add_argument(
+        "--angle-disturb-deg",
+        type=non_negative_float,
+        default=DEFAULT_ANGLE_DISTURB_DEG,
+        help=(
+            "maximum seed-controlled random in-plane z rotation in degrees "
+            f"(default: +/-{DEFAULT_ANGLE_DISTURB_DEG:.1f})"
+        ),
+    )
+    parser.add_argument(
+        "--tilt-max-deg",
+        type=non_negative_float,
+        default=DEFAULT_TILT_MAX_DEG,
+        help=(
+            "maximum seed-controlled random tilt in degrees about x and y "
+            f"(default: +/-{DEFAULT_TILT_MAX_DEG:.1f})"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -381,7 +489,15 @@ def main() -> None:
     box_lengths = tuple(args.box)
     output_format = args.format or infer_format(args.output)
     atom_count = atom_count_from_density(args.density, box_lengths, args.rounding)
-    positions = graphene_flake_positions(atom_count, box_lengths, args.flake_area, args.seed)
+    positions = graphene_flake_positions(
+        atom_count,
+        box_lengths,
+        args.flake_area,
+        args.seed,
+        args.base_angle_deg,
+        args.angle_disturb_deg,
+        args.tilt_max_deg,
+    )
     achieved_density = achieved_density_g_cm3(atom_count, box_lengths)
 
     if output_format == "extxyz":
@@ -394,6 +510,9 @@ def main() -> None:
     print(f"box_A: {box_lengths[0]:.8f} {box_lengths[1]:.8f} {box_lengths[2]:.8f}")
     print(f"num_atoms: {atom_count}")
     print(f"flake_area_A2: {args.flake_area:.8f}")
+    print(f"base_angle_deg: {args.base_angle_deg:.8f}")
+    print(f"angle_disturb_deg: {args.angle_disturb_deg:.8f}")
+    print(f"tilt_max_deg: {args.tilt_max_deg:.8f}")
     print(f"rounding_mode: {args.rounding}")
     print(f"output_format: {output_format}")
     print(f"output_path: {args.output}")

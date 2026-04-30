@@ -3,9 +3,11 @@
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 from autonomy import collect_run_records, summarize_loop_state
+from config import shell_escape
 
 
 def parse_args():
@@ -20,14 +22,11 @@ def parse_args():
     return parser.parse_args()
 
 
-def shell_escape(value):
-    return str(value).replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$")
-
-
 def main():
     args = parse_args()
-    runs_root = args.runs_root.resolve() if args.runs_root else None
-    records = collect_run_records(runs_root) if runs_root else collect_run_records(Path(__file__).resolve().parent / "my_runs")
+    default_runs_root = Path(os.environ.get("A3HT_RUNS_ROOT", str(Path(__file__).resolve().parent / "my_runs")))
+    runs_root = (args.runs_root or default_runs_root).resolve()
+    records = collect_run_records(runs_root)
     summary = summarize_loop_state(records)
 
     if args.format == "json":

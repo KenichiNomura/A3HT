@@ -56,7 +56,7 @@ Recommended practical setup:
 
 - a LAMMPS build that supports `fix ehex` and can load the linked runtime libraries
 - the REBO2 parameter file `CH.rebo` available in the repo root
-- multiple independent seeds in `my_runs/` if you want meaningful ML training data
+- multiple independent seeds under the selected runs root (`my_runs/` by default) if you want meaningful ML training data
 - a Globus token for the ALCF inference endpoint (primary planner); authenticate once with `python3 inference_auth_token.py authenticate`
 - a PBS environment if you want to use the included queue-filler unchanged
 
@@ -68,6 +68,18 @@ export A3HT_ALCF_MODEL=meta-llama/Meta-Llama-3.1-405B-Instruct
 
 These are especially important for cron and PBS jobs, which often do not inherit your interactive shell startup files.
 
+For a clean high-conductivity campaign that does not mix with older `my_runs/` history, use a separate runs root and state directory:
+
+```bash
+export A3HT_RUNS_ROOT="${PWD}/campaigns/kappa10_base90_tilt90/my_runs"
+export A3HT_STATE_DIR="${PWD}/campaigns/kappa10_base90_tilt90/.queue_state"
+export A3HT_STRUCTURE_BASE_ANGLE_DEG=90.0
+export A3HT_STRUCTURE_ANGLE_DISTURB_DEG=20.0
+export A3HT_STRUCTURE_TILT_MAX_DEG=90.0
+```
+
+The default structure-orientation campaign settings are now a 90 degree base x-tilt plus seed-controlled random x/y tilt up to `+/-90` degrees.
+
 The default in-repo LAMMPS executable used by `run.sh` is:
 
 `lammps-30Mar2026/build-cray-rebo2/lmp`
@@ -78,10 +90,10 @@ The default in-repo LAMMPS executable used by `run.sh` is:
 ## Main Files
 
 - `run.sh`: end-to-end driver for environment checks, optional simulation planning, structure generation, annealing, thermalization, and NEMD
-- `cron_queue.sh`: drives the autonomous loop by checking cohort stop/wait conditions, planning the next run before submission, and prioritizing retry seeds from `.queue_state/resubmit_seeds.txt`
+- `cron_queue.sh`: drives the autonomous loop by checking cohort stop/wait conditions once per queue-fill invocation, planning each submitted run before `qsub`, and prioritizing retry seeds from `.queue_state/resubmit_seeds.txt`
 - `plan_simulation.py`: uses the ALCF inference endpoint to choose per-run simulation parameters, or reuses active-cohort parameters; falls back to random parameter exploration if ALCF is unavailable; validates hard constraints and writes run-local plan artifacts
 - `loop_status.py`: reports whether the autonomous loop should stop, wait for the active cohorts, reuse a selected cohort, or open a new cohort
-- `autonomy.py`: shared cohort statistics and stop-condition logic
+- `autonomy.py`: shared cohort statistics, terminal-run record caching, and stop-condition logic
 - `simulation_plan_schema.json`: JSON schema enforced on planner output
 - `prepare_resubmits.py`: finds failed/incomplete runs, purges their run directories, and writes the retry queue for cron
 - `generate_random_carbon.py`: creates a random carbon network from rotated graphene-like flakes
@@ -102,16 +114,17 @@ The simulation side of A3HT is organized as a compact planned pipeline before an
 `cron_queue.sh` calls the planner before `qsub`, and `run.sh` calls it after environment checks pass if the plan artifacts are still missing:
 
 ```bash
-python3 plan_simulation.py --seed 123 --run-dir my_runs/123
+python3 plan_simulation.py --seed 123 --run-dir my_runs/123 --runs-root my_runs
 ```
 
 The planner:
 
-- summarizes recent successful runs from `my_runs/`
-- tries the ALCF inference endpoint first, then falls back to random parameter exploration
+- summarizes recent successful runs from the selected runs root
+- tries the ALCF inference endpoint first
 - reuses the active cohort parameters when repeated same-parameter seeds are still needed
 - validates the result against the current hard bounds
-- fails with a non-zero exit code if all planners are unavailable (no silent fallback)
+- falls back to random parameter exploration when the ALCF planner is unavailable
+- fails with a non-zero exit code if validation fails, or if planner use is explicitly disabled and no reusable cohort exists
 
 Each run gets:
 
@@ -129,7 +142,7 @@ Current hard geometry constraints are:
 
 The current target goal encoded in the planner is:
 
-- thermal conductivity target: `3 W/m-K`
+- thermal conductivity target: `10 W/m-K`
 - relative uncertainty target: `< 10%`
 - minimum evaluable seeds per cohort: `10`
 - maximum simultaneous open cohorts: `3` by default
@@ -138,7 +151,7 @@ The same physical parameter set is repeated with different random seeds within a
 
 The autonomous loop stops submitting new jobs when any cohort reaches:
 
-- mean thermal conductivity `>= 3 W/m-K`
+- mean thermal conductivity `>= 10 W/m-K`
 - relative uncertainty `< 10%`
 - at least `10` evaluable seeds in that cohort
 
@@ -155,10 +168,15 @@ The relative uncertainty is computed from the standard error of the cohort mean 
   --seed 123 \
   --output random_carbon.extxyz \
   --flake-area "${A3HT_FLAKE_AREA_A2}" \
+  --base-angle-deg "${A3HT_STRUCTURE_BASE_ANGLE_DEG:-90.0}" \
+  --angle-disturb-deg "${A3HT_STRUCTURE_ANGLE_DISTURB_DEG:-20.0}" \
+  --tilt-max-deg "${A3HT_STRUCTURE_TILT_MAX_DEG:-90.0}" \
   --format lammps
 ```
 
 The generated file is then renamed to `random_carbon.dat` and used as the LAMMPS input structure.
+
+`--base-angle-deg` is a fixed rotation about x applied to every flake. `--tilt-max-deg` controls the seed-dependent random x/y tilt range; with the current defaults, each flake gets random x and y tilt components sampled from `[-90, 90]` degrees.
 
 ### 3. Anneal the structure
 
@@ -272,7 +290,7 @@ bash run.sh --seed 101 --ntasks 32 --processors 4,4,2
 
 Each run is written under:
 
-`my_runs/<seed>/`
+`${A3HT_RUNS_ROOT:-my_runs}/<seed>/`
 
 with logs:
 
@@ -292,7 +310,7 @@ These plan artifacts record the cohort id, planner source, target conductivity, 
 
 and simulation outputs under:
 
-`my_runs/<seed>/data/`
+`${A3HT_RUNS_ROOT:-my_runs}/<seed>/data/`
 
 `run_status.txt` contains one of:
 
@@ -320,7 +338,7 @@ Tokens are cached in `~/.globus/` and refreshed automatically for up to 30 days.
 
 `cron_queue.sh` forwards `A3HT_ALCF_MODEL` into `qsub`.
 
-`cron_queue.sh` also forwards `A3HT_ROOT_DIR` into `qsub`, so batch jobs resolve paths relative to the repository root even when cron starts from `$HOME`.
+`cron_queue.sh` also forwards `A3HT_ROOT_DIR`, `A3HT_RUNS_ROOT`, `A3HT_STATE_DIR`, and the structure-orientation variables into `qsub`, so batch jobs resolve paths and campaign settings consistently even when cron starts from `$HOME`.
 
 To override the default number of simultaneous cohorts, set:
 
@@ -328,18 +346,24 @@ To override the default number of simultaneous cohorts, set:
 export A3HT_MAX_SIMULTANEOUS_COHORTS=3
 ```
 
-By default it tries to keep up to `A3HT_TARGET_JOBS` jobs in the scheduler, subject to the autonomous loop stop/wait rules, and submits `run.sh` with successive seeds from:
+By default it tries to keep up to `A3HT_TARGET_JOBS` jobs in the scheduler, subject to the autonomous loop stop/wait rules, and submits at most `A3HT_TARGET_JOBS - active_jobs` new jobs in one invocation. Brand-new runs use successive seeds from:
 
-`.queue_state/next_seed`
+`${A3HT_STATE_DIR:-.queue_state}/next_seed`
 
-Before each `qsub`, `cron_queue.sh` checks the current cohort status:
+At the start of each queue-fill invocation, `cron_queue.sh` checks the current cohort status:
 
 - `stop`: no new jobs are submitted because a cohort already meets the target
 - `wait_active_cohorts`: no new jobs are submitted because the maximum number of simultaneous cohorts is already open and each has enough running jobs to potentially reach the minimum cohort size
 - `reuse_active_cohort`: the next seed reuses the selected open cohort parameters
 - `plan_new_cohort`: a fresh plan is generated for a new cohort
 
-When a submission is needed, `cron_queue.sh` creates `my_runs/<seed>/simulation_plan.*` so the submitted job already has a validated parameter set and cohort assignment.
+When a submission is needed, `cron_queue.sh` creates `${A3HT_RUNS_ROOT:-my_runs}/<seed>/simulation_plan.*` so the submitted job already has a validated parameter set and cohort assignment.
+
+The loop status scanner caches terminal `SUCCESS` and `FAILED` records in:
+
+`${A3HT_STATE_DIR:-.queue_state}/run_records_cache.json`
+
+This avoids repeatedly parsing completed run directories while cron is filling the queue. Terminal statuses are treated as immutable; if you manually edit a completed run's status, plan, or final conductivity, delete this cache file so the next loop-status check rebuilds it from the selected runs root.
 
 If:
 
@@ -356,9 +380,9 @@ python3 prepare_resubmits.py --purge-run-dirs
 
 This script:
 
-- scans `my_runs/` for non-successful runs
-- queues failed seeds in `.queue_state/resubmit_seeds.txt`
-- writes a manifest to `.queue_state/resubmit_manifest.json`
+- scans the selected runs root for non-successful runs
+- queues failed seeds in `${A3HT_STATE_DIR:-.queue_state}/resubmit_seeds.txt`
+- writes a manifest to `${A3HT_STATE_DIR:-.queue_state}/resubmit_manifest.json`
 - removes the corresponding run directories before retry so stale partial outputs do not survive into the resubmission
 
 `cron_queue.sh` consumes `.queue_state/resubmit_seeds.txt` before it advances `.queue_state/next_seed`, so retries are submitted ahead of brand-new seeds.

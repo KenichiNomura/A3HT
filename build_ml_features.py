@@ -19,6 +19,7 @@ import argparse
 import csv
 import json
 import math
+import os
 import statistics
 import subprocess
 import sys
@@ -29,6 +30,7 @@ import numpy as np
 
 
 ROOT = Path(__file__).resolve().parent
+DEFAULT_RUNS_ROOT = Path(os.environ.get("A3HT_RUNS_ROOT", str(ROOT / "my_runs")))
 ANALYZE_SNAPSHOT = ROOT / "analyze_glassy_carbon.py"
 ANALYZE_TRAJECTORY = ROOT / "analyze_glassy_carbon_trajectory.py"
 
@@ -88,7 +90,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--runs-root",
-        default=str(ROOT / "my_runs"),
+        default=str(DEFAULT_RUNS_ROOT),
         help="root directory containing per-run subdirectories",
     )
     parser.add_argument(
